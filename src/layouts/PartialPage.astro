@@ -1,0 +1,70 @@
+---
+interface Props {
+  lang: string;
+  title: string;
+}
+let { lang, title } = Astro.props;
+---
+
+<html lang={lang}>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="rboud" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{title}</title>
+        <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/normalize/7.0.0/normalize.min.css"
+    />
+        <link
+      href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@300;900&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <slot />
+    <style is:global>
+      :root {
+        --clr-dark: #303030;
+        --clr-light: #fff;
+        --clr-accent: #16e8bd;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        font-family: "Source Code Pro", monospace;
+        color: var(--clr-dark);
+        background-color: var(--clr-light);
+        margin: 0;
+        padding: 0;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+
+      a {
+        text-decoration: none;
+        color: inherit;
+      }
+
+      p {
+        padding: 5px 0;
+        text-align: justify;
+      }
+
+      section {
+        padding: 20px;
+      }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+---
+import HeroLang from "./Hero.lang.json";
+
+interface Props {
+  lang?: SupportedLanguages;
+}
+let { lang = "fr" }: Props = Astro.props;
+---
+
+<section>
+  <div class="wrapper">
+    <h1 class="title">{HeroLang[lang].title}</h1>
+    <p class="subtitle">{HeroLang[lang].subtitle}</p>
+    <p class="description">{HeroLang[lang].description}</p>
+  </div>
+</section>
+
+<style>
+  section {
+    background-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .title {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--clr-dark);
+  }
+
+  .subtitle {
+    font-size: 1.5rem;
+    font-weight: bold;
+    background-color: var(--clr-accent);
+    padding: 10px;
+    text-align: center;
+  }
+
+  .description {
+    padding-top: 30px;
+    font-size: 1rem;
+    color: var(--clr-dark);
+  }
+
+  .wrapper {
+    padding: 20px;
+  }
+
+</style>
