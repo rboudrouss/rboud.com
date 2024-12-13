@@ -30,18 +30,14 @@
 	--gradient-stop-2: var(--accent-regular);
 	--gradient-stop-3: var(--accent-dark);
 	--gradient-subtle: linear-gradient(150deg, var(--gray-900) 19%, var(--gray-999) 150%);
-	--gradient-accent: linear-gradient(
-		150deg,
-		var(--gradient-stop-1),
-		var(--gradient-stop-2),
-		var(--gradient-stop-3)
-	);
-	--gradient-accent-orange: linear-gradient(
-		150deg,
-		#ca7879,
-		var(--accent-regular),
-		var(--accent-dark)
-	);
+	--gradient-accent: linear-gradient(150deg,
+			var(--gradient-stop-1),
+			var(--gradient-stop-2),
+			var(--gradient-stop-3));
+	--gradient-accent-orange: linear-gradient(150deg,
+			#ca7879,
+			var(--accent-regular),
+			var(--accent-dark));
 	--gradient-stroke: linear-gradient(180deg, var(--gray-900), var(--gray-700));
 
 	/* Shadows */
@@ -99,12 +95,10 @@
 
 	--gradient-stop-1: #4c11c6;
 	--gradient-subtle: linear-gradient(150deg, var(--gray-900) 19%, var(--gray-999) 81%);
-	--gradient-accent-orange: linear-gradient(
-		150deg,
-		#ca7879,
-		var(--accent-regular),
-		var(--accent-light)
-	);
+	--gradient-accent-orange: linear-gradient(150deg,
+			#ca7879,
+			var(--accent-regular),
+			var(--accent-light));
 	--gradient-stroke: linear-gradient(180deg, var(--gray-600), var(--gray-800));
 
 	--shadow-sm: 0px 6px 3px rgba(255, 255, 255, 0.01), 0px 4px 2px rgba(255, 255, 255, 0.01),
@@ -205,24 +199,31 @@ h5 {
 .gap-2 {
 	gap: 0.5rem;
 }
+
 .gap-4 {
 	gap: 1rem;
 }
+
 .gap-8 {
 	gap: 2rem;
 }
+
 .gap-10 {
 	gap: 2.5rem;
 }
+
 .gap-15 {
 	gap: 3.75rem;
 }
+
 .gap-20 {
 	gap: 5rem;
 }
+
 .gap-30 {
 	gap: 7.5rem;
 }
+
 .gap-48 {
 	gap: 12rem;
 }
@@ -231,24 +232,31 @@ h5 {
 	.lg\:gap-2 {
 		gap: 0.5rem;
 	}
+
 	.lg\:gap-4 {
 		gap: 1rem;
 	}
+
 	.lg\:gap-8 {
 		gap: 2rem;
 	}
+
 	.lg\:gap-10 {
 		gap: 2.5rem;
 	}
+
 	.lg\:gap-15 {
 		gap: 3.75rem;
 	}
+
 	.lg\:gap-20 {
 		gap: 5rem;
 	}
+
 	.lg\:gap-30 {
 		gap: 7.5rem;
 	}
+
 	.lg\:gap-48 {
 		gap: 12rem;
 	}
