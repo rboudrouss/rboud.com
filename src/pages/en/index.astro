@@ -2,19 +2,19 @@
 import { getCollection } from "astro:content";
 
 // Layout import — provides basic page elements: <head>, <nav>, <footer> etc.
-import BaseLayout from "../layouts/BaseLayout.astro";
+import BaseLayout from "../../layouts/BaseLayout.astro";
 
 // Component Imports
-import CallToAction from "../components/CallToAction.astro";
-import Grid from "../components/Grid.astro";
-import Hero from "../components/Hero.astro";
-import Icon from "../components/Icon.astro";
-import Pill from "../components/Pill.astro";
-import PortfolioPreview from "../components/PortfolioPreview.astro";
+import CallToAction from "../../components/CallToAction.astro";
+import Grid from "../../components/Grid.astro";
+import Hero from "../../components/Hero.astro";
+import Icon from "../../components/Icon.astro";
+import Pill from "../../components/Pill.astro";
+import PortfolioPreview from "../../components/PortfolioPreview.astro";
 
 // Page section components
-import ContactCTA from "../components/ContactCTA.astro";
-import Skills from "../components/Skills.astro";
+import ContactCTA from "../../components/ContactCTA.astro";
+import Skills from "../../components/Skills.astro";
 
 // Content Fetching: List four most recent work projects
 const projects = (await getCollection("work"))
@@ -30,13 +30,13 @@ const projects = (await getCollection("work"))
 		<div class="wrapper stack gap-8 lg:gap-20">
 			<header>
 				<Hero
-					title="Boudrouss Réda"
-					tagline="Je suis un développeur web passionné par la création de sites web et d'applications."
+					title="Hello, my name is Boudrouss Réda"
+					tagline="I am a Creative Developer who is currently based in Portland, Oregon."
 				>
 				 <div class="center">
 					 <div class="roles">
-						 <Pill><Icon icon="code" size="1.33em" /> FullStack Developer</Pill>
-						 <Pill><Icon icon="website" size="1.33em" /> Web dev</Pill>
+						 <Pill><Icon icon="code" size="1.33em" /> Developer</Pill>
+						 <Pill><Icon icon="microphone-stage" size="1.33em" /> Speaker</Pill>
 						 <Pill><Icon icon="pencil-line" size="1.33em" /> Writer</Pill>
 						</div>
 					</div>
