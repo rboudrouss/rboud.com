@@ -12,12 +12,13 @@ import { ClientRouter } from "astro:transitions";
 interface Props {
 	title?: string | undefined;
 	description?: string | undefined;
+	lang?: string | undefined;
 }
 
-const { title, description } = Astro.props;
+const { title, description, lang = "fr" } = Astro.props;
 ---
 
-<html lang="en">
+<html lang={lang}>
 	<head>
 		<ClientRouter />
 		<MainHead title={title} description={description} />
