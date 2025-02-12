@@ -15,17 +15,17 @@ interface Props {
 	lang?: string | undefined;
 }
 
-const { title, description, lang = "fr" } = Astro.props;
+const { title, description, lang = "" } = Astro.props;
 ---
 
-<html lang={lang}>
+<html lang={lang || "fr"}>
 	<head>
 		<ClientRouter />
 		<MainHead title={title} description={description} />
 	</head>
 	<body>
 		<div class="stack backgrounds">
-			<Nav transition:persist />
+			<Nav transition:persist lang={lang} />
 			<slot />
 			<Footer transition:persist />
 		</div>

@@ -3,12 +3,15 @@ import type { CollectionEntry } from "astro:content";
 
 interface Props {
 	project: CollectionEntry<"work"> | CollectionEntry<"workEn">;
+	lang?: "en";
 }
 
 const { data, id } = Astro.props.project;
+let {lang = ""} = Astro.props;
+if (lang === "en") lang = "/en";
 ---
 
-<a class="card" href={`/work/${id}`}>
+<a class="card" href={`${lang}/work/${id}`}>
 	<span class="title">{data.title}</span>
 	<img
 		src={data.img}
