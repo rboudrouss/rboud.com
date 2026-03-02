@@ -1,17 +1,14 @@
-/* =============================================
-   Design System — Academic Personal Page
-   ============================================= */
 :root {
 	/* Colors */
 	--bg: #f9f8f5;
 	--surface: #ffffff;
 	--text: #1a1a2e;
 	--text-muted: #64748b;
-	--accent: #2d6a4f;
-	--accent-light: #52b788;
-	--accent-subtle: #d8f3dc;
+	--accent: #1a6fbf;
+	--accent-light: #4da6f5;
+	--accent-subtle: #dbeeff;
 	--border: #e2e8f0;
-	--link: #1d4ed8;
+	--link: #1a6fbf;
 
 	/* Typography */
 	--font-sans: 'Inter', 'Public Sans', system-ui, sans-serif;
@@ -28,9 +25,6 @@
 	--transition: 0.2s ease;
 }
 
-/* =============================================
-   Reset & Base
-   ============================================= */
 *, *::before, *::after {
 	box-sizing: border-box;
 	margin: 0;
@@ -72,7 +66,6 @@ h1, h2, h3 {
 	color: var(--text);
 }
 
-/* Utility */
 .sr-only {
 	position: absolute;
 	width: 1px;
