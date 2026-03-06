@@ -6,6 +6,9 @@ export default defineConfig({
   site: "https://rboud.com",
   i18n: {
     locales: ['en', 'fr'],
-    defaultLocale: 'fr',
+    defaultLocale: 'en',
+    routing: {
+      prefixDefaultLocale: false,
+    },
   }
 });

@@ -1,17 +1,23 @@
 ---
-import BaseLayout from "../layouts/BaseLayout.astro";
+import BaseLayout from "../../layouts/BaseLayout.astro";
 ---
 
-<BaseLayout lang="en">
+<BaseLayout lang="fr">
 	<div class="page">
 		<!-- ── NAV ── -->
 		<nav class="topnav">
 			<div class="container nav-inner">
 				<span class="nav-name"></span>
 				<ul class="nav-links">
-					<li><a href="#education">Education</a></li>
-					<li><a href="#experience">Experience</a></li>
-					<li><a class="lang-switch" href="/fr/">FR</a></li>
+					<li><a href="#formation">Formation</a></li>
+					<li><a href="#experiences">Expériences</a></li>
+					<li>
+						<a
+							class="lang-switch"
+							href="/"
+							onclick="sessionStorage.setItem('lang-override','en')">EN</a
+						>
+					</li>
 				</ul>
 			</div>
 		</nav>
@@ -21,16 +27,17 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 			<div class="hero-text">
 				<h1>Réda Boudrouss</h1>
 				<p class="hero-title">
-					M2 Student · Static Analysis &amp; WebAssembly
+					Étudiant M2 · Analyse statique &amp; WebAssembly
 				</p>
-				<p class="hero-institution">Sorbonne University</p>
+				<p class="hero-institution">Sorbonne Université</p>
 				<p class="hero-bio">
-					M2 STL student interested in <strong
-						>static analysis of dynamic languages</strong
-					> and the possibilities offered by <strong>WebAssembly</strong>.
-					Currently working on porting the <strong
+					Étudiant en Master 2 STL, je m'intéresse à l'<strong
+						>analyse statique des langages dynamiques</strong
+					>
+					et aux possibilités offertes par <strong>WebAssembly</strong>.
+					Actuellement, je travaille sur le portage de l'analyseur <strong
 						><a href="https://mopsa.lip6.fr/" target="_blank">MOPSA</a></strong
-					> analyzer to WebAssembly.
+					> vers WebAssembly.
 				</p>
 				<div class="hero-links">
 					<a class="btn" href="mailto:contact@rboud.com">✉ Email</a>
@@ -53,25 +60,27 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 		</header>
 
 		<main class="container main-content">
-			<!-- ── EDUCATION ── -->
-			<section id="education" class="section">
-				<h2 class="section-title">Education</h2>
+			<!-- ── FORMATION ── -->
+			<section id="formation" class="section">
+				<h2 class="section-title">Formation</h2>
 				<div class="timeline">
 					<div class="timeline-item">
 						<span class="period">2024 – 2026</span>
 						<div class="timeline-body">
-							<strong class="tl-role">Master of Science in Software Technology</strong>
-							<span class="tl-org">Sorbonne University</span>
+							<strong class="tl-role"
+								>Master Science et Technologie du Logiciel</strong
+							>
+							<span class="tl-org">Sorbonne Université</span>
 							<ul class="tl-list">
 								<li>
-									Advanced algorithms, design and verification of safe software,
-									concurrent, functional and distributed programming, and
-									complex software architecture development
+									Algorithmique avancée, conception et vérification de logiciels
+									sûrs, programmation concurrente, fonctionnelle et répartie, et
+									développement d'architectures logicielles complexes
 								</li>
 								<li>
-									Development of typing/interpretation pipelines, static program
-									analysis, and algorithm design for graphs and Web/Mobile
-									applications
+									Développement de chaînes de typage/interprétation, analyse
+									statique de programmes et conception d'algorithmes pour
+									graphes et applications Web/Mobile
 								</li>
 							</ul>
 						</div>
@@ -79,15 +88,15 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 					<div class="timeline-item">
 						<span class="period">2020 – 2024</span>
 						<div class="timeline-body">
-							<strong class="tl-role">Bachelor of Computer Science</strong>
-							<span class="tl-org">Sorbonne University</span>
+							<strong class="tl-role">Licence Informatique</strong>
+							<span class="tl-org">Sorbonne Université</span>
 							<ul class="tl-list">
 								<li>
-									Algorithms, OS, networks, databases, functional and OO
-									programming
+									Algorithmique, OS, réseaux, bases de données, programmation
+									fonctionnelle et OO
 								</li>
 								<li>
-									Many collaborative projects: C, Java, OCaml, Python,
+									Nombreux projets collaboratifs : C, Java, OCaml, Python,
 									TypeScript
 								</li>
 							</ul>
@@ -96,70 +105,77 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 				</div>
 			</section>
 
-			<!-- ── EXPERIENCE ── -->
-			<section id="experience" class="section">
-				<h2 class="section-title">Experience</h2>
+			<!-- ── EXPÉRIENCES ── -->
+			<section id="experiences" class="section">
+				<h2 class="section-title">Expériences</h2>
 				<div class="timeline">
 					<div class="timeline-item">
-						<span class="period">2025 – 2026</span>
+						<span class="period">2025 - 2026</span>
 						<div class="timeline-body">
-							<strong class="tl-role">Quality Analyst</strong>
+							<strong class="tl-role">Quality analyst</strong>
 							<span class="tl-org">Hexaglobe</span>
 							<ul class="tl-list">
 								<li>
-									Designing verification and quality control systems for each
-									project to ensure reliability and consistency of developments
+									Concevoir des systèmes de vérification et de contrôle de
+									qualité pour chaque projet pour garantir la fiabilité et la
+									cohérence des développements
 								</li>
-								<li>Deployment and test automation (CI/CD)</li>
+								<li>
+									Automatisation des déploiements et des tests (CI/CD)
+								</li>
 							</ul>
 						</div>
 					</div>
 					<div class="timeline-item">
-						<span class="period">2023 – 2026</span>
+						<span class="period">2023 - 2026</span>
 						<div class="timeline-body">
-							<strong class="tl-role">Technical Lead</strong>
-							<span class="tl-org">Play Sorbonne University Association</span>
+							<strong class="tl-role">Responsable Technique</strong>
+							<span class="tl-org">Association Play Sorbonne Université</span>
 							<ul class="tl-list">
 								<li>
-									Virtualized infrastructure: Docker servers, CI/CD
-									orchestration, Google Workspace
+									Infrastructure virtualisée : serveurs Docker, orchestration
+									CI/CD, Google Workspace
 								</li>
 								<li>
-									Showcase website: <strong>9,000 unique visitors</strong> in
-									2025, on-page SEO, analytics
+									Site vitrine : <strong>9 000 visiteurs uniques</strong> en 2025,
+									SEO on-page, analytics
 								</li>
 								<li>
-									Local-first mobile web app for quest tracking: secure auth,
-									optimized high-load back-end
+									Web App mobile local-first pour suivi de quêtes : auth
+									sécurisée, back-end optimisé haute charge
 								</li>
 							</ul>
 						</div>
 					</div>
 					<div class="timeline-item">
-						<span class="period">2024 – 2025</span>
+						<span class="period">2024 - 2025</span>
 						<div class="timeline-body">
-							<strong class="tl-role">President</strong>
-							<span class="tl-org">Play Sorbonne University Association</span>
+							<strong class="tl-role">Président</strong>
+							<span class="tl-org">Association Play Sorbonne Université</span>
 							<ul class="tl-list">
-								<li>Global strategy coordination, project supervision</li>
 								<li>
-									Managing a team of <strong>100+ volunteers</strong>
+									Coordination de la stratégie globale, supervision des projets
 								</li>
 								<li>
-									Cultural event welcoming <strong>10,000+ visitors</strong>
+									Management d'une équipe de <strong>100+ bénévoles</strong>
+								</li>
+								<li>
+									Événement culturel accueillant <strong
+										>10 000+ visiteurs</strong
+									>
 								</li>
 							</ul>
 						</div>
 					</div>
 					<div class="timeline-item">
-						<span class="period">2021 – 2025</span>
+						<span class="period">2021 - 2025</span>
 						<div class="timeline-body">
-							<strong class="tl-role">General Employee</strong>
+							<strong class="tl-role">Employé Polyvalent</strong>
 							<span class="tl-org">Lidl France, Asnières-sur-Seine</span>
 							<ul class="tl-list">
 								<li>
-									Cash register supervision, stock management, complaint
-									handling
+									Supervision des caisses, gestion des stocks, traitement des
+									réclamations
 								</li>
 							</ul>
 						</div>
@@ -167,15 +183,15 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 				</div>
 			</section>
 
-			<!-- ── SKILLS ── -->
-			<section id="skills" class="section">
-				<h2 class="section-title">Skills</h2>
+			<!-- ── COMPÉTENCES ── -->
+			<section id="competences" class="section">
+				<h2 class="section-title">Compétences</h2>
 				<div class="skills-grid">
 					<div class="skill-group">
-						<h3 class="skill-label">Languages</h3>
+						<h3 class="skill-label">Langues</h3>
 						<div class="tags">
 							{
-								["French (Native)", "English (Professional)", "Arabic (Conversational)"].map(
+								["Français (Natif)", "Anglais (Pro)", "Arabe (Conv)"].map(
 									(t) => <span class="tag">{t}</span>,
 								)
 							}
@@ -204,16 +220,6 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 		</footer>
 	</div>
 </BaseLayout>
-
-<!-- Language detection: redirect French browser users to /fr/ unless they chose English manually -->
-<script>
-	if (!sessionStorage.getItem('lang-override')) {
-		const lang = (navigator.language || '').toLowerCase();
-		if (lang.startsWith('fr')) {
-			window.location.replace('/fr/');
-		}
-	}
-</script>
 
 <style>
 	/* ── Layout ── */
