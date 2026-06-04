@@ -1,0 +1,203 @@
+---
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import FormattedDate from "../../components/FormattedDate.astro";
+
+const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
+	(a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
+);
+---
+
+<BaseLayout title="Blog · Réda Boudrouss" lang="en">
+	<div class="page">
+		<!-- ── NAV ── -->
+		<nav class="topnav">
+			<div class="container nav-inner">
+				<a class="nav-name" href="/">Réda Boudrouss</a>
+				<ul class="nav-links">
+					<li><a href="/blog/">Blog</a></li>
+					<li><a href="/">Home</a></li>
+				</ul>
+			</div>
+		</nav>
+
+		<main class="container main-content">
+			<header class="blog-head">
+				<h1>Blog</h1>
+				<p class="blog-intro">
+					Notes on static analysis, WebAssembly, and whatever else I'm tinkering
+					with.
+				</p>
+			</header>
+
+			{
+				posts.length === 0 ? (
+					<p class="empty">No posts yet — check back soon.</p>
+				) : (
+					<ul class="post-list">
+						{posts.map((post) => (
+							<li class="post-item">
+								<a class="post-link" href={`/blog/${post.id}/`}>
+									<span class="post-date">
+										<FormattedDate date={post.data.pubDate} />
+									</span>
+									<span class="post-title">{post.data.title}</span>
+									{post.data.description && (
+										<span class="post-desc">{post.data.description}</span>
+									)}
+								</a>
+							</li>
+						))}
+					</ul>
+				)
+			}
+		</main>
+
+		<!-- ── FOOTER ── -->
+		<footer class="footer">
+			<div class="container footer-inner">
+				<p><strong>Réda Boudrouss</strong> &mdash; Paris, France</p>
+				<p>
+					<a href="mailto:contact@rboud.com">contact@rboud.com</a>
+					&nbsp;&middot;&nbsp;
+					<a href="https://linkedin.com/in/rboudrouss" target="_blank">LinkedIn</a>
+					&nbsp;&middot;&nbsp;
+					<a href="https://github.com/rboudrouss" target="_blank">GitHub</a>
+				</p>
+			</div>
+		</footer>
+	</div>
+</BaseLayout>
+
+<style>
+	.page {
+		display: flex;
+		flex-direction: column;
+		min-height: 100vh;
+	}
+	.container {
+		width: 100%;
+		max-width: var(--container);
+		margin-inline: auto;
+		padding-inline: 1.5rem;
+	}
+
+	/* ── Nav ── */
+	.topnav {
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		background: rgba(249, 248, 245, 0.88);
+		backdrop-filter: blur(10px);
+		border-bottom: 1px solid var(--border);
+	}
+	.nav-inner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: 3.5rem;
+	}
+	.nav-name {
+		font-weight: 600;
+		font-size: 0.95rem;
+		color: var(--text);
+		letter-spacing: 0.02em;
+	}
+	.nav-links {
+		display: flex;
+		gap: 1.75rem;
+		list-style: none;
+	}
+	.nav-links a {
+		color: var(--text-muted);
+		font-size: 0.9rem;
+		font-weight: 500;
+		transition: color var(--transition);
+	}
+	.nav-links a:hover {
+		color: var(--accent);
+		opacity: 1;
+	}
+
+	/* ── Head ── */
+	.main-content {
+		flex: 1;
+		padding-top: 4rem;
+		padding-bottom: 5rem;
+	}
+	.blog-head {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		margin-bottom: 2.5rem;
+		padding-bottom: 1.5rem;
+		border-bottom: 2px solid var(--accent-light);
+	}
+	.blog-head h1 {
+		font-size: clamp(2rem, 5vw, 2.8rem);
+		font-weight: 700;
+	}
+	.blog-intro {
+		color: var(--text-muted);
+		max-width: 55ch;
+	}
+	.empty {
+		color: var(--text-muted);
+	}
+
+	/* ── Post list ── */
+	.post-list {
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.post-link {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		padding: 1rem;
+		border-radius: 0.5rem;
+		border: 1px solid transparent;
+		transition: background var(--transition), border-color var(--transition);
+	}
+	.post-link:hover {
+		background: var(--surface);
+		border-color: var(--border);
+		opacity: 1;
+	}
+	.post-date {
+		font-size: 0.78rem;
+		color: var(--text-muted);
+		font-weight: 600;
+	}
+	.post-title {
+		font-family: var(--font-serif);
+		font-size: 1.2rem;
+		font-weight: 600;
+		color: var(--text);
+	}
+	.post-desc {
+		font-size: 0.9rem;
+		color: var(--text-muted);
+	}
+
+	/* ── Footer ── */
+	.footer {
+		background: var(--surface);
+		border-top: 1px solid var(--border);
+	}
+	.footer-inner {
+		padding-block: 2rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.footer p {
+		font-size: 0.875rem;
+		color: var(--text-muted);
+	}
+	.footer a {
+		color: var(--link);
+	}
+</style>
