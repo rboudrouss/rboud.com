@@ -4,7 +4,7 @@ description: "A static analyzer written in OCaml with native C/C++ dependencies,
 pubDate: 2026-06-04
 ---
 
-- TODO Screenshot/GIF of the playground running in a single tab
+- https://mopsawasm.rboud.com/
 
 MOPSA is a static analyzer based on abstract interpretation. It analyzes C and Python code, and it's written *mostly* in OCaml. That "mostly" is doing a lot of work, under the OCaml sits a stack of native libraries (GMP, MPFR, Zarith, Apron for the numerical domains, and LLVM/Clang to parse C) all bound to OCaml through its foreign function interface (FFI).
 
