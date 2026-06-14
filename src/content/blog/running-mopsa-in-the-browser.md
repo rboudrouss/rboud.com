@@ -26,19 +26,31 @@ The diagram above shows every dependency that ships C or C++ code. The dashed on
 So a lot of the C/C++ here doesn't just compute and return, it allocates inside OCaml's heap and reads the tags and fields of OCaml blocks. Every one of those call sites bakes in an assumption about what an OCaml value is, byte for byte, in memory.
 
 
-## 3. The architectural bet: interpret the bytecode, don't recompile OCaml
+## The architectural bet: interpret the bytecode, don't recompile OCaml
 
-- **Why not `js_of_ocaml` / `wasm_of_ocaml` / `wasocaml`?** They all share one blind spot:
-  they compile the *OCaml* (bytecode or typedtree) and leave the C/C++ behind. Fine for a
-  pure-OCaml project — but MOPSA's analysis *is* GMP + Apron + Clang reached through the
-  FFI. Going that route means reimplementing every native primitive in JS/wasm by hand.
-- **The bet, the other direction:** don't recompile the OCaml. Compile `ocamlrun`
-  (the bytecode interpreter) to wasm via emscripten; statically link all the native code
-  (C/C++ libs + FFI stubs) into **one `ocamlrun.wasm`**; preload `mopsa.bc` into the
-  virtual filesystem. emscripten is what lets the native C/C++ come along for the ride.
-- Architecture diagram. Lineage: Vincent Chan's fork, Binji's LLVM notes.
+First, why not `wasm_of_ocaml`, `js_of_ocaml`, or `wasocaml`? They all share the same blind spot: they compile the OCaml and leave the C/C++ behind. That's fine for a pure-OCaml project (or one whose few native dependencies already have a JS reimplementation, like `zarith_stubs_js`). But as far as I could tell, none of them offers a general escape hatch that *doesn't* require hand-writing glue to bridge wasm and JS. In my case that would mean rewriting `Clang_to_ml.cc` entirely in JavaScript, and then maintaining that rewrite.
 
-## 4. ⭐ The core fight: OCaml values across the FFI boundary on wasm32
+What I wanted instead was:
+
+- **As little code as possible**, so the result stays maintainable.
+- **As few moving parts as possible.** Getting a module compiled by `wasm_of_ocaml` to talk to one compiled by `emscripten` would mean understanding, in depth, how each compiler lays out and manages memory, and then writing the plumbing to stitch the two together.
+
+And there was a more concrete problem underneath all this: **what do I link the FFI stubs against?** The C/C++ files that use the OCaml FFI call into runtime functions (`caml_alloc`, `caml_callback`, …). If I only compile the OCaml *code*, those symbols simply don't exist, the stubs have nothing to link against.
+
+After a lot of trial and error (much of it still visible in [this repo](https://github.com/rboudrouss/mopsa-wasm)), the answer turned out to be the **OCaml runtime itself**: it's the thing that "*provides*" an implementation of all those `caml_*` functions.
+
+And that quietly solves every point at once. No more juggling several tools, I can lean on `emscripten` alone, because once I bring in the runtime I'm left with nothing but C and C++ to compile.
+
+So the plan: compile the OCaml to bytecode, compile the OCaml runtime and all the native dependencies to wasm, link that native bundle together, then run the bytecode on top. And that should just work... right?
+
+## How do I link everything
+
+- comment compiler ocaml
+- parler de prims.o, de l'extraction des primitives
+- des trucs que je compile pas dans libocamlrun
+- comment j'intègre les libs
+
+## 4. The core fight: OCaml values across the FFI boundary on wasm32
 
 *The signature section — the longest, the payoff. Target ~30–40% of the article.*
 
