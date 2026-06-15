@@ -126,17 +126,17 @@ char * caml_names_of_builtin_cprim[] = {
 Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
 
-## Compilation des stubs CamlIDL
+## Compiling CamlIDL based stubs
 
-CamlIDL est un générateur de stubs. On lui donne un fichier `.idl` décrivant un ensemble de types et fonctions C, et il produit deux choses : `foo_stubs.c`, qui contient les fonctions C qui marshallent les valeurs OCaml vers C et inversement, et `foo.ml`/`foo.mli`, qui est l'API OCaml. L'idée est de ne jamais écrire la glue de marshalling à la main.
+CamlIDL est un générateur de stubs. On lui donne un fichier `.idl` décrivant un ensemble de types et fonctions C, et il produit deux choses : `foo_stubs.c`, qui contient les fonctions C qui convertissent les valeurs OCaml vers C et inversement, et `foo.ml`/`foo.mli`, qui est l'API OCaml. L'idée est de ne jamais écrire la tuyauterie de conversion à la main.
 
-Deux dépendances de MOPSA s'appuient là-dessus massivement : **mlgmpidl** (bindings OCaml pour GMP et MPFR) et **mlapronidl** (bindings OCaml pour les domaines abstraits d'Apron). Ensemble, ils représentent environ 655 des ~1435 primitives de la table finale.
+Deux dépendances de MOPSA s'appuient là-dessus énormement : **mlgmpidl** (bindings OCaml pour GMP et MPFR) et **mlapronidl** (bindings OCaml pour les domaines abstraits d'Apron). Ensemble, ils représentent environ 655 des ~1435 primitives de la table finale.
 
-La raison pour laquelle on ne peut pas simplement réutiliser leurs objets natifs pré-compilés est la même que pour tout morceau de code C qui touche des valeurs OCaml : les stubs générés appellent `caml_alloc`, lisent des blocs via les macros de `mlvalues.h` — bref, ils s'appuient sur la représentation mémoire des valeurs OCaml. Des objets natifs compilés pour x86-64 ont ces hypothèses figées dedans. Tout doit donc être recompilé avec `emcc`, et contre les headers du runtime OCaml qui sera effectivement utilisé à l'exécution.
+### CamlIDL runtime
 
-### Le runtime CamlIDL
+`camlidl` s'éxecute au moment de la compulation pur générer les fichiers `.ml` et `.c` nécessaire. Sauf que tout les fichiers générés reposes sur le `CamlIDL runtime` qui est un ensemble de 3 fichiers (`idlalloc.c`, `comintf.c` et `comerror.c`) qui fournissent des utils pour les codes générés, notamment l'allocation mémoire et des utilitaires d'interfaces...
 
-Distinct de l'outil `camlidl` (qui tourne à la compilation pour générer les `.c`) est le *runtime* CamlIDL : une petite bibliothèque C que les stubs générés appellent à l'exécution. Ce sont trois fichiers — `idlalloc.c`, `comintf.c`, `comerror.c` — qui fournissent l'allocation mémoire et des utilitaires d'interface de style COM utilisés en interne par le code généré.
+Voici la commande dans le makefile utilisé pour complisé ces fichiers
 
 ```make
 $(LIBS_DIR)/libcamlidl.a:
@@ -150,9 +150,11 @@ $(LIBS_DIR)/libcamlidl.a:
         $(BUILD_DIR)/idlalloc.o $(BUILD_DIR)/comintf.o $(BUILD_DIR)/comerror.o
 ```
 
+On notera l'option `-I$(OCAML_STDLIB)` : c'est le chemin vers les headers de la FFI OCaml, ceux du runtime qu'on vient de compiler. Elle est nécessaire pour deux raisons : ces fichiers camlidl appellent les fonctions de la FFI, et leurs headers doivent être précisément ceux, spécifiques, du runtime qui sera amené à exécuter.
+
 ### mlgmpidl
 
-mlgmpidl encapsule les entiers GMP (`mpz_t`), les rationnels (`mpq_t`), les flottants (`mpf_t`), les nombres MPFR (`mpfr_t`) et l'état aléatoire — six modules au total. Son script configure est suffisamment moderne pour que `emconfigure` gère la génération des stubs proprement : lancer `make *.c` dans l'arbre source configuré exécute `camlidl` et produit les six fichiers `.c`, qui sont ensuite compilés avec `emcc` un par un :
+mlgmpidl encapsule les entiers GMP (`mpz_t`), les rationnels (`mpq_t`), les flottants (`mpf_t`), les nombres MPFR (`mpfr_t`) et l'état aléatoire — six modules au total. Son build est autonome : son propre Makefile sait piloter `camlidl`. Un simple `make *.c` exécute `camlidl` et son post-traitement Perl, produisant les fichiers `.c` que je compile ensuite un par un avec `emcc` :
 
 ```make
 $(LIBS_DIR)/libgmp_caml.a: $(LIBS_DIR)/libgmp.a $(LIBS_DIR)/libmpfr.a $(LIBS_DIR)/libcamlidl.a
