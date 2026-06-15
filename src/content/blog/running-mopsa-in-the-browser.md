@@ -126,11 +126,83 @@ char * caml_names_of_builtin_cprim[] = {
 Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
 
-## Compiling Apron / mlgmpidl (camlidl)
+## Compilation des stubs CamlIDL
 
-- camlidl regenerates the C stubs at build time; each `.c` recompiled with `emcc`
-- Makefile orchestration: `mlapronidl`, then box/oct/polka with `-DNUM_MPQ`
-- tie back to the `Tag_val` patch: these stubs are exactly the code that would have crashed without it (random "index out of bounds" errors)
+CamlIDL est un générateur de stubs. On lui donne un fichier `.idl` décrivant un ensemble de types et fonctions C, et il produit deux choses : `foo_stubs.c`, qui contient les fonctions C qui marshallent les valeurs OCaml vers C et inversement, et `foo.ml`/`foo.mli`, qui est l'API OCaml. L'idée est de ne jamais écrire la glue de marshalling à la main.
+
+Deux dépendances de MOPSA s'appuient là-dessus massivement : **mlgmpidl** (bindings OCaml pour GMP et MPFR) et **mlapronidl** (bindings OCaml pour les domaines abstraits d'Apron). Ensemble, ils représentent environ 655 des ~1435 primitives de la table finale.
+
+La raison pour laquelle on ne peut pas simplement réutiliser leurs objets natifs pré-compilés est la même que pour tout morceau de code C qui touche des valeurs OCaml : les stubs générés appellent `caml_alloc`, lisent des blocs via les macros de `mlvalues.h` — bref, ils s'appuient sur la représentation mémoire des valeurs OCaml. Des objets natifs compilés pour x86-64 ont ces hypothèses figées dedans. Tout doit donc être recompilé avec `emcc`, et contre les headers du runtime OCaml qui sera effectivement utilisé à l'exécution.
+
+### Le runtime CamlIDL
+
+Distinct de l'outil `camlidl` (qui tourne à la compilation pour générer les `.c`) est le *runtime* CamlIDL : une petite bibliothèque C que les stubs générés appellent à l'exécution. Ce sont trois fichiers — `idlalloc.c`, `comintf.c`, `comerror.c` — qui fournissent l'allocation mémoire et des utilitaires d'interface de style COM utilisés en interne par le code généré.
+
+```make
+$(LIBS_DIR)/libcamlidl.a:
+    $(EMCC) $(EMCC_FLAGS) -D_FILE_OFFSET_BITS=64 -D_REENTRANT \
+        -c -I$(OCAML_STDLIB) $(DEPS_DIR)/camlidl/runtime/idlalloc.c  -o $(BUILD_DIR)/idlalloc.o
+    $(EMCC) $(EMCC_FLAGS) -D_FILE_OFFSET_BITS=64 -D_REENTRANT \
+        -c -I$(OCAML_STDLIB) $(DEPS_DIR)/camlidl/runtime/comintf.c   -o $(BUILD_DIR)/comintf.o
+    $(EMCC) $(EMCC_FLAGS) -D_FILE_OFFSET_BITS=64 -D_REENTRANT \
+        -c -I$(OCAML_STDLIB) $(DEPS_DIR)/camlidl/runtime/comerror.c  -o $(BUILD_DIR)/comerror.o
+    $(EMAR) rcs $(LIBS_DIR)/libcamlidl.a \
+        $(BUILD_DIR)/idlalloc.o $(BUILD_DIR)/comintf.o $(BUILD_DIR)/comerror.o
+```
+
+### mlgmpidl
+
+mlgmpidl encapsule les entiers GMP (`mpz_t`), les rationnels (`mpq_t`), les flottants (`mpf_t`), les nombres MPFR (`mpfr_t`) et l'état aléatoire — six modules au total. Son script configure est suffisamment moderne pour que `emconfigure` gère la génération des stubs proprement : lancer `make *.c` dans l'arbre source configuré exécute `camlidl` et produit les six fichiers `.c`, qui sont ensuite compilés avec `emcc` un par un :
+
+```make
+$(LIBS_DIR)/libgmp_caml.a: $(LIBS_DIR)/libgmp.a $(LIBS_DIR)/libmpfr.a $(LIBS_DIR)/libcamlidl.a
+    cd $(DEPS_DIR)/mlgmpidl
+    CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
+        -prefix $(INSTALL_DIR) -gmp-prefix $(INSTALL_DIR) -mpfr-prefix $(INSTALL_DIR)
+    CFLAGS="$(CFLAGS)" $(MAKE) $(MLGMPIDL_MODULES:%=%.c)
+    for module in $(MLGMPIDL_MODULES); do
+        $(EMCC) $(EMCC_FLAGS) -c -I$(OCAML_STDLIB) -I$(INSTALL_DIR)/include \
+            $${module}.c -o $(BUILD_DIR)/$${module}.o
+    done
+    $(EMAR) rcs $(LIBS_DIR)/libgmp_caml.a $(addprefix $(BUILD_DIR)/,$(MLGMPIDL_MODULES:%=%.o))
+```
+
+Aucun post-traitement nécessaire. Les stubs sortent de `camlidl` déjà compatibles avec la version d'OCaml utilisée.
+
+### mlapronidl
+
+Les bindings OCaml d'Apron — `mlapronidl` — couvrent 18 modules IDL décrivant chaque concept de domaine abstrait : scalaires, intervalles, expressions linéaires, contraintes linéaires, générateurs, expressions arborescentes, managers, et les valeurs abstraites elles-mêmes (niveau 0 brut et niveau 1 avec environnements). C'est là que réside la majorité de la surface FFI d'Apron.
+
+La compilation est plus complexe que mlgmpidl parce que les fichiers IDL de `mlapronidl` ont été écrits pour un ancien couple `camlidl`/OCaml. Lancer `camlidl` directement produirait des stubs qui ne compilent pas proprement. Le correctif vient de deux scripts Perl fournis par le dépôt Apron : `perlscript_c.pl` réécrit le `.c` généré, `perlscript_caml.pl` réécrit le `.ml`/`.mli` généré.
+
+```make
+for idl in $(MLAPRONIDL_IDL); do
+    $(CAMLIDL) -no-include -prepro "$(PERL) macros.pl" $$idl.idl && \
+    $(PERL) perlscript_c.pl    < $${idl}_stubs.c > $${idl}_caml.c && \
+    $(PERL) perlscript_caml.pl < $$idl.ml        > $$idl.ml.tmp && mv $$idl.ml.tmp $$idl.ml && \
+    $(PERL) perlscript_caml.pl < $$idl.mli       > $$idl.mli.tmp && mv $$idl.mli.tmp $$idl.mli
+done
+for module in $(MLAPRONIDL_MODULES); do
+    $(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
+        -I$(DEPS_DIR)/apron/apron -I$(DEPS_DIR)/apron/mlapronidl \
+        -o $(BUILD_DIR)/$${module}.o $(DEPS_DIR)/apron/mlapronidl/$${module}.c
+done
+$(EMAR) rcs $@ $(addprefix $(BUILD_DIR)/,$(MLAPRONIDL_MODULES:%=%.o))
+```
+
+`CAMLIDL_CFLAGS` contient notamment `-I$(OCAML_STDLIB)`, qui pointe vers les headers du runtime OCaml dans `deps/ocaml-wasm/runtime` — les stubs seront exécutés par ce même runtime, ils doivent donc être compilés contre ses headers pour que les deux s'accordent.
+
+Chaque domaine numérique (box, octagones, polka) obtient ensuite sa propre archive, compilée avec `-DNUM_MPQ` :
+
+```make
+$(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
+    -I$(DEPS_DIR)/apron/box -DNUM_MPQ \
+    -o $(BUILD_DIR)/box_caml.o $(DEPS_DIR)/apron/box/box_caml.c
+$(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
+```
+
+`NUM_MPQ` indique à Apron d'utiliser les rationnels multi-précision exacts de GMP (`mpq_t`) plutôt que des `double` matériels pour toutes les bornes. Les domaines flottants d'Apron s'appuient normalement sur `fesetround` pour contrôler l'arrondi vers le haut/bas au niveau matériel — et WebAssembly n'a aucun contrôle de mode d'arrondi FPU. Avec `NUM_MPQ`, chaque borne est calculée exactement via GMP et `fesetround` n'est jamais nécessaire.
+
 
 ## Compiling LLVM/Clang 9
 
