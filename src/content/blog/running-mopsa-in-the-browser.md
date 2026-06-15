@@ -45,40 +45,24 @@ So the plan: compile the OCaml to bytecode, compile the OCaml runtime and all th
 
 ## How do I link everything
 
-Compiler `ocamlrun` en WebAssembly ne suffit pas : encore faut-il que l'interpréteur retrouve, à l'exécution, le code C derrière chaque `external` du bytecode. Et c'est là que ça se complique, parce que **OCaml résout ses primitives C dynamiquement** — un mécanisme qui n'a aucun sens dans un navigateur.
+Before thinking about compilation (something Emscripten handles well enough), it's worth thinking about linking. The interpreter needs to find, at runtime, the C code behind each `external` declared in the bytecode. And there, **OCaml resolves its C primitives dynamically** via `dlopen` and `dlsym`.
 
-### Comment OCaml lie ses primitives, normalement
+### How it works, and why it breaks
 
-Quand vous écrivez `external foo : int -> int = "caml_foo"`, le compilateur n'émet jamais d'appel direct à `caml_foo`. Il lui attribue un **numéro** et émet une instruction `C_CALLn <index>`. Tout le binding nom → adresse est repoussé au démarrage du programme.
+When you write `external foo : int -> int = "caml_foo"`, the compiler never emits a direct call to `caml_foo`. It assigns it a **number** and emits a `C_CALLn <index>` instruction. The name-address binding is only resolved at program startup: OCaml `dlopen`s the native libraries and `dlsym`s each primitive by name to fill a table of function pointers. At runtime, `C_CALLn <index>` is just `caml_prim_table[index](args)`.
 
-Un exécutable bytecode embarque pour cela trois sections :
+Emscripten does have a way to emulate dynamic module loading, but it's complex to set up and splits the binary into multiple wasm modules. Since keeping everything in a single static `.wasm` seemed simpler (and at 12 MB the result is still reasonable) I chose to short-circuit this mechanism entirely.
 
-- `PRIM` — la liste ordonnée des **noms** de primitives référencées (`caml_foo`, `unix_read`, …) ;
-- `DLLS` — la liste des bibliothèques partagées qui les fournissent (`dllunix.so`, …) ;
-- `DLPT` — les chemins où chercher ces `.so`.
-
-Au lancement, `caml_build_primitive_table` (dans `runtime/dynlink.c`) déroule la mécanique :
-
-1. il `dlopen`e chaque `.so` listé dans `DLLS` ;
-2. pour chaque nom de `PRIM`, il appelle `dlsym` sur ces bibliothèques pour récupérer l'adresse réelle de la fonction ;
-3. il range ces pointeurs, dans l'ordre, dans un tableau `caml_prim_table`.
-
-À l'exécution, `C_CALLn <index>` n'est plus qu'un `caml_prim_table[index](args)`. Le nom a disparu, il ne reste qu'un indice dans un tableau de pointeurs.
-
-Sauf qu'en WASM, **il n'y a ni `dlopen`, ni `.so`, ni fichiers de bibliothèques natives à charger**. Toute cette résolution dynamique est morte-née. Il faut la remplacer par un binding entièrement statique — décidé au moment du link, pas au runtime.
-
-### La porte de sortie : `caml_builtin_cprim` et `prims.o`
-
-Bonne nouvelle : OCaml prévoit déjà ce cas. Avant de fouiller dans les `.so`, `lookup_primitive` regarde d'abord une **table statique** compilée dans le runtime lui-même :
+The OCaml runtime already has a static path for this. Before searching through `.so` files, `lookup_primitive` first checks a **static table** compiled into the runtime itself:
 
 ```c
 static c_primitive lookup_primitive(char * name)
 {
-  /* 1. table built-in, liée statiquement */
+  /* 1. built-in table, statically linked */
   for (int i = 0; caml_names_of_builtin_cprim[i] != NULL; i++)
     if (strcmp(name, caml_names_of_builtin_cprim[i]) == 0)
       return caml_builtin_cprim[i];
-  /* 2. seulement ensuite, les .so chargés dynamiquement */
+  /* 2. only then, dynamically loaded .so files */
   for (int i = 0; i < shared_libs.size; i++) {
     void * res = caml_dlsym(shared_libs.contents[i], name);
     if (res != NULL) return (c_primitive) res;
@@ -87,9 +71,9 @@ static c_primitive lookup_primitive(char * name)
 }
 ```
 
-Ces deux tableaux — `caml_builtin_cprim[]` (les pointeurs) et `caml_names_of_builtin_cprim[]` (les noms) — sont exactement ce que produit `ocamlc -custom` : un fichier généré, classiquement appelé `prims.c`, qui déclare toutes les primitives de l'exécutable et les range dans ces deux tables. C'est le mode « tout statique » d'OCaml, prévu à l'origine pour produire des exécutables sans dépendance aux `dll*.so`.
+These two arrays, `caml_builtin_cprim[]` (the pointers) and `caml_names_of_builtin_cprim[]` (the names), are exactly what `ocamlc -custom` produces, a generated file, conventionally called `prims.c`, that declares all the primitives of the executable and stores them in these two tables. This is OCaml's "fully static" mode, originally designed to produce executables with no dependency on `dll*.so` files.
 
-**C'est précisément sur ce point d'entrée que je me greffe.** Je fournis mon propre `prims.c` contenant *toutes* les primitives dont le bytecode de Mopsa a besoin, et je neutralise dans le runtime la branche `dlopen` — qui de toute façon n'a rien à charger. Le patch tient en quelques lignes commentées dans `caml_build_primitive_table` :
+So then I supply my own `prims.c` containing *all* the primitives the MOPSA bytecode needs, and I disable the `dlopen` branch in the runtime (which has nothing to load anyway). The patch is a few commented-out lines in `caml_build_primitive_table`:
 
 ```c
 caml_ext_table_init(&shared_libs, 8);
@@ -99,11 +83,15 @@ caml_ext_table_init(&shared_libs, 8);
 //     open_shared_lib(p);
 ```
 
-`shared_libs` reste donc vide en permanence. La seconde boucle de `lookup_primitive` (le `dlsym`) ne trouve jamais rien : **chaque primitive doit être présente dans ma table built-in**, sinon le runtime s'arrête net sur `unknown C primitive`. Le binding dynamique est devenu statique sans toucher au contrat : mêmes noms, même indexation issue de la section `PRIM`.
+`shared_libs` (the runtime's internal list of `dlopen`ed `.so` files) stays empty permanently. The second loop in `lookup_primitive` never finds anything: **every primitive must be present in my built-in table**, or the runtime halts immediately with `unknown C primitive`.
 
-### Fabriquer `prims.o` : extraire les primitives
+### Building `prims.o`: extracting the primitives
 
-Mon `prims.c` est généré à partir d'une simple liste de noms, `primitives.txt`, et de trois lignes de `sed` dans le Makefile :
+The table must be a **superset** of everything the bytecode calls. I collect the primitives by scanning the C/C++ sources (both the runtime's and every library I link) with a small script, `extract-primitives.js`. It follows the same idea as OCaml's `gen_primitives.sh` (`sed -n 's/^CAMLprim value \(…\)/\1/p'`) but is more robust, because MOPSA's and Apron's sources don't always follow the `CAMLprim value foo(...)` convention.
+
+The result, ~1435 primitives, is the union of several worlds: the runtime core (`caml_*`), `unix` (131 primitives), `str`, `bigarray`/`int64`, and the 655 Apron stubs generated by CamlIDL (`camlidl_*_ap_*`). I commit `primitives.txt` as-is; occasionally I cross-check it against `strings build/mopsa.bc` to verify it actually covers what the bytecode calls.
+
+From that list, `prims.c` is generated with three `sed` passes in the Makefile:
 
 ```make
 $(BUILD_DIR)/prims.o:
@@ -121,12 +109,12 @@ $(BUILD_DIR)/prims.o:
 	    -c -I $(OCAML_STDLIB) -o $(BUILD_DIR)/prims.o $(BUILD_DIR)/prims.c
 ```
 
-Le fichier généré ressemble à ça :
+The generated file looks like this:
 
 ```c
 extern value caml_array_get();
 extern value unix_read();
-/* … 1435 lignes … */
+/* … 1435 lines … */
 
 c_primitive caml_builtin_cprim[] = {
     caml_array_get, unix_read, /* … */ 0 };
@@ -135,36 +123,24 @@ char * caml_names_of_builtin_cprim[] = {
     "caml_array_get", "unix_read", /* … */ 0 };
 ```
 
-Chaque primitive est déclarée `extern value foo();` — sans prototype d'arguments. Leurs signatures réelles diffèrent (arités 1 à 5, plus `N`), mais c'est sans conséquence : l'interpréteur recaste systématiquement le pointeur à la bonne arité au moment de l'appel (`Primitive1(n)`, `Primitive2(n)`, … dans `prims.h`). D'où le `-Wno-incompatible-function-pointer-types` qui fait taire l'avertissement attendu.
+Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
-Reste la vraie question : comment construire `primitives.txt` ? La table doit être un **sur-ensemble** de tout ce que le bytecode appelle. Je récupère donc les primitives en scannant les sources C/C++ — celles du runtime *et* de chaque bibliothèque que je lie — avec un petit script, `extract-primitives.js`. Il reprend l'idée du `gen_primitives.sh` d'OCaml (`sed -n 's/^CAMLprim value \(…\)/\1/p'`) mais en plus robuste, parce que les sources de Mopsa et d'Apron ne se contentent pas de `CAMLprim value foo(...)`. Il sait reconnaître :
 
-- les qualificatifs intercalés (`CAMLweakdef`, `extern "C"`, …) ;
-- le raccourci `CAMLprim_int64_N(name)` → `caml_int64_<name>` + `caml_int64_<name>_native` ;
-- les **macros à collage de jetons** (`#define FOO(X) CAMLprim … prefix_##X(…)`), qu'il développe à leur point d'invocation ;
-- les stubs générés par CamlIDL, déclarés en `value foo(value a, value b, …)` sans `CAMLprim` ;
-- en C++, le fait qu'une vraie primitive doit avoir une *linkage* `extern "C"` (pour ne pas embarquer des méthodes de classe).
+## Compiling Apron / mlgmpidl (camlidl)
 
-Le résultat, ~1435 primitives, est l'union de plusieurs mondes : le cœur du runtime (`caml_*`), `unix` (131 primitives), `str`, `bigarray`/`int64`, et surtout les **655 stubs Apron générés par CamlIDL** (`camlidl_*_ap_*`). Je commit `primitives.txt` tel quel ; à l'occasion je le recoupe avec `strings build/mopsa.bc` pour vérifier qu'il couvre bien la section `PRIM` réelle du bytecode.
+- camlidl regenerates the C stubs at build time; each `.c` recompiled with `emcc`
+- Makefile orchestration: `mlapronidl`, then box/oct/polka with `-DNUM_MPQ`
+- tie back to the `Tag_val` patch: these stubs are exactly the code that would have crashed without it (random "index out of bounds" errors)
 
-### Ce que je ne compile pas dans `libcamlrun`
+## Compiling LLVM/Clang 9
 
-Le runtime, lui, je le veux le plus nu possible. Deux décisions vont dans ce sens.
+- two-stage cross-compile: native `llvm-tblgen` / `clang-tblgen` first, then the wasm libs (~30 min, RTTI/EH off)
+- list of retained Clang libs
+- `Clang_to_ml.cc`: the C++→OCaml values bridge, and the Clang resource headers preloaded into the virtual FS
 
-D'abord, `configure` désactive tout ce qui n'a aucun sens en WASM ou que je n'utilise pas :
+## The final link: everything static
 
-```sh
-emconfigure ./configure --disable-native-compiler --disable-ocamltest \
-                        --disable-ocamldoc --disable-systhreads
-```
-
-Pas de compilateur natif (on n'interprète que du bytecode), pas de threads système, et — via le patch décrit plus haut — pas de chargement dynamique.
-
-Ensuite, et c'est le point important : **les stubs C des bibliothèques (`unix`, `str`) ne sont pas patchés dans l'arbre du runtime** (`deps/ocaml-wasm`). Je les garde comme unités de compilation autonomes dans `deps/primitives/{unix,str}`, assemblées à part dans `libmopsa_primitives.a`. Ça garde le fork OCaml minimal et facile à rebaser sur une version amont ultérieure. Au passage, j'ai aussi écarté `systhreads`, `integers`, `ctypes` et `core_kernel` qui traînaient dans le fork d'origine : un `strings build/mopsa.bc` confirme que le bytecode de Mopsa ne référence aucune de leurs primitives, donc elles n'ont pas à exister dans la table.
-
-### L'intégration finale : tout en statique
-
-Le link final d'emscripten rassemble tout dans un unique `ocamlrun.wasm` :
+emscripten's final link pulls everything into a single `ocamlrun.wasm`:
 
 ```make
 $(EMCC) ... -o $(DIST_DIR)/ocamlrun.js \
@@ -174,17 +150,15 @@ $(EMCC) ... -o $(DIST_DIR)/ocamlrun.js \
     $(BUILD_DIR)/prims.o $(BUILD_DIR)/libcamlrun.a
 ```
 
-Trois choses à noter :
+Three things worth noting:
 
-- **Tout est lié statiquement** : `libcamlrun.a` (l'interpréteur), `prims.o` (la table de primitives), et l'ensemble des archives `.a` — GMP, MPFR, Apron, le runtime CamlIDL, les stubs OCaml d'Apron (box/oct/polka), Zarith, Clang/LLVM, le parseur C de Mopsa, et mes `libmopsa_primitives.a` (unix + str). C'est ce qui donne un `.wasm` autonome de ~15 Mo.
-- `ERROR_ON_UNDEFINED_SYMBOLS=1` est mon filet de sécurité : il garantit que **chaque symbole nommé dans `caml_builtin_cprim[]` correspond bien à une fonction réellement présente** dans l'une des archives. Si `primitives.txt` cite une primitive que personne ne fournit, le link wasm échoue bruyamment — plutôt qu'un `unknown C primitive` au runtime, dans le navigateur, au pire moment.
-- **`mopsa.bc` n'est pas lié** : il est *préchargé* dans le système de fichiers virtuel d'emscripten, puis interprété au runtime par `ocamlrun`. C'est du bytecode, pas du code natif.
+- **Everything is statically linked**: `libcamlrun.a` (the interpreter), `prims.o` (the primitive table), and all the `.a` archives — GMP, MPFR, Apron, the CamlIDL runtime, the OCaml Apron stubs (box/oct/polka), Zarith, Clang/LLVM, MOPSA's C parser, and my `libmopsa_primitives.a` (unix + str). That's what yields a self-contained `.wasm` of ~15 MB.
+- `ERROR_ON_UNDEFINED_SYMBOLS=1` is my safety net: it guarantees that **every symbol named in `caml_builtin_cprim[]` actually exists** in one of the archives. If `primitives.txt` names a primitive that nothing provides, the wasm link fails loudly — rather than hitting `unknown C primitive` at runtime, in the browser, at the worst possible moment.
+- **`mopsa.bc` is not linked**: it is *preloaded* into emscripten's virtual filesystem, then interpreted at runtime by `ocamlrun`. It's bytecode, not native code.
 
-La boucle est bouclée : le bytecode appelle une primitive par son index → au démarrage, `caml_prim_table` est rempli depuis `caml_builtin_cprim[]` sans le moindre `dlopen` → et ces symboles pointent vers du code C statiquement lié dans l'unique `ocamlrun.wasm`. Le mécanisme dynamique d'OCaml a été entièrement remplacé par une résolution figée au link, ce qui est exactement ce qu'attend un binaire WebAssembly.
+The loop is closed: the bytecode calls a primitive by index → at startup, `caml_prim_table` is filled from `caml_builtin_cprim[]` without a single `dlopen` → and those symbols point to C code statically linked into the single `ocamlrun.wasm`. OCaml's dynamic mechanism has been entirely replaced by a resolution frozen at link time — which is exactly what a WebAssembly binary expects.
 
 ## 4. The core fight: OCaml values across the FFI boundary on wasm32
-
-*The signature section — the longest, the payoff. Target ~30–40% of the article.*
 
 - Primer: how an OCaml value is represented (immediate vs boxed block, the **header word**
   before the pointer, tag + wosize + color). Memory diagram.
@@ -209,20 +183,6 @@ La boucle est bouclée : le bytecode appelle une primitive par son index → au 
 - **The honest plot twist** (from my notes): in practice the *native 64-bit* bytecode
   also runs on wasm32 — why, and what that says about bytecode portability.
   Sidebar: "what I expected vs what actually happened".
-
-## 6. Generating the FFI glue: camlidl + Apron, cross-compiled
-
-- camlidl regenerates the bindings' C stubs at build time; each `.c` recompiled with `emcc`.
-- The Makefile orchestration (mlapronidl, then box/oct/polka in `-DNUM_MPQ`).
-- Tie back to §4: these stubs are exactly the code that would have crashed without the
-  `Tag_val` patch.
-
-## 7. Compiling LLVM/Clang 9 to wasm (the C++ half)
-
-- Two-stage cross-compile: native `llvm-tblgen` / `clang-tblgen` first, then the wasm libs.
-- The ~30 min, RTTI/EH off, the list of Clang libs.
-- `Clang_to_ml.cc`: the C++→OCaml bridge, and the Clang resource headers preloaded into
-  the virtual FS.
 
 ## 8. The long tail of soundness under wasm
 
