@@ -125,6 +125,23 @@ char * caml_names_of_builtin_cprim[] = {
 
 Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
+## Compiling the ocaml runtime
+
+La compilation du runtime est assez directe, modulo un petit soucis. OCaml 4.14 a introduit `runtime/sak`, un outil exécuté sur le host pour encoder le chemin de la stdlib dans un littéral C. `emconfigure` le compile avec `emcc` et produit un `.wasm` impossible à exécuter nativement, le build continue silencieusement, le chemin reste vide, et l'échec n'arrive qu'à l'exécution. pour résoudre ça je compile `sak` manuellement avec le vrai `cc` avant de lancer `make`.
+
+```make
+CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
+    --disable-native-compiler \
+    --disable-systhreads \
+    --disable-ocamltest --disable-ocamldoc
+rm -f runtime/sak runtime/sak.o runtime/sak.wasm
+cc -c -o runtime/sak.o runtime/sak.c && cc -o runtime/sak runtime/sak.o
+touch runtime/sak.o runtime/sak
+CFLAGS="$(CFLAGS)" $(MAKE) -C runtime libcamlrun.a
+```
+
+Le répertoire `runtime/` contient les headers `<caml/*.h>` qui définissent l'API FFI d'OCaml, les mêmes dont dépendent tous les stubs C qu'on va compiler ensuite. Toutes les compilations ultérieures qui touchent au FFI passent donc `-I$(OCAML_STDLIB)`, ce qui pointe vers ce même `runtime/`. Ça garantit que les stubs sont compilés contre les définitions exactes du runtime qui les exécutera.
+
 
 ## Compiling CamlIDL based stubs
 
@@ -150,7 +167,7 @@ $(LIBS_DIR)/libcamlidl.a:
         $(BUILD_DIR)/idlalloc.o $(BUILD_DIR)/comintf.o $(BUILD_DIR)/comerror.o
 ```
 
-On notera l'option `-I$(OCAML_STDLIB)` : c'est le chemin vers les headers de la FFI OCaml, ceux du runtime qu'on vient de compiler. Elle est nécessaire pour deux raisons : ces fichiers camlidl appellent les fonctions de la FFI, et leurs headers doivent être précisément ceux, spécifiques, du runtime qui sera amené à exécuter.
+On notera l'option `-I$(OCAML_STDLIB)`, c'est le chemin vers les headers de la FFI OCaml, ceux du runtime qu'on vient de compiler. Elle est nécessaire pour deux raisons : ces fichiers camlidl appellent les fonctions de la FFI, et leurs headers doivent être précisément ceux, spécifiques, du runtime qui sera amené à exécuter.
 
 ### mlgmpidl
 
