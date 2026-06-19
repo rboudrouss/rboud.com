@@ -142,6 +142,34 @@ CFLAGS="$(CFLAGS)" $(MAKE) -C runtime libcamlrun.a
 
 Le répertoire `runtime/` contient les headers `<caml/*.h>` qui définissent l'API FFI d'OCaml, les mêmes dont dépendent tous les stubs C qu'on va compiler ensuite. Toutes les compilations ultérieures qui touchent au FFI passent donc `-I$(OCAML_STDLIB)`, ce qui pointe vers ce même `runtime/`. Ça garantit que les stubs sont compilés contre les définitions exactes du runtime qui les exécutera.
 
+## Compiling MPFR & GMP
+
+GMP et MPFR sont les deux premières bibliothèques à compiler, et c'est là que la chance commence : elles compilent avec emscripten sans quasiment aucune modification.
+
+Le pattern est le même pour les deux : `emconfigure ./configure` suivi de `make`. `emconfigure` substitue les variables d'environnement du compilateur (`CC`, `AR`, etc.) pour pointer vers les outils emscripten, ce qui suffit pour que la détection de features dans `configure` cible wasm32 plutôt que le host.
+
+```make
+# GMP
+CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
+    --disable-assembly \
+    --host=none \
+    --prefix=$(INSTALL_DIR)
+$(MAKE) && $(MAKE) install
+
+# MPFR (dépend de GMP)
+touch aclocal.m4 configure
+find . -name "Makefile.in" -exec touch {} \;
+CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
+    --with-gmp=$(INSTALL_DIR) \
+    --host=none \
+    --prefix=$(INSTALL_DIR)
+$(MAKE) && $(MAKE) install
+```
+
+Deux détails à noter. Pour GMP, `--disable-assembly` est indispensable : GMP utilise normalement des routines assembleur spécifiques à l'architecture (x86, ARM…) pour ses performances, et emscripten ne peut évidemment pas les compiler. `--host=none` empêche `configure` de détecter et d'utiliser les optimisations du host. Pour MPFR, le `touch` sur `aclocal.m4` et `configure` évite que `make` tente de relancer autoconf pour recalculer les `Makefile.in` — ce qui échouerait dans l'environnement emscripten.
+
+Les versions spécifiques (GMP 6.1.2 et MPFR 4.2.2) ne sont pas arbitraires : ce sont celles connues pour compiler proprement avec emscripten, pointées par [une réponse Stack Overflow](https://stackoverflow.com/a/43583154).
+
 
 ## Compiling CamlIDL based stubs
 
@@ -171,7 +199,7 @@ On notera l'option `-I$(OCAML_STDLIB)`, c'est le chemin vers les headers de la F
 
 ### mlgmpidl
 
-mlgmpidl encapsule les entiers GMP (`mpz_t`), les rationnels (`mpq_t`), les flottants (`mpf_t`), les nombres MPFR (`mpfr_t`) et l'état aléatoire — six modules au total. Son build est autonome : son propre Makefile sait piloter `camlidl`. Un simple `make *.c` exécute `camlidl` et son post-traitement Perl, produisant les fichiers `.c` que je compile ensuite un par un avec `emcc` :
+Le module mlgmpidl est donc celui qui encapsule les différents type proposé par GMP & MPFR poru qu'ils puissent être utilisé en OCaml. Il est composé de six modules au totale. Pour le compiler nous générons avec le `Makefile` les différents ficheirs C que nous compilons avec `emcc`
 
 ```make
 $(LIBS_DIR)/libgmp_caml.a: $(LIBS_DIR)/libgmp.a $(LIBS_DIR)/libmpfr.a $(LIBS_DIR)/libcamlidl.a
@@ -186,21 +214,12 @@ $(LIBS_DIR)/libgmp_caml.a: $(LIBS_DIR)/libgmp.a $(LIBS_DIR)/libmpfr.a $(LIBS_DIR
     $(EMAR) rcs $(LIBS_DIR)/libgmp_caml.a $(addprefix $(BUILD_DIR)/,$(MLGMPIDL_MODULES:%=%.o))
 ```
 
-Aucun post-traitement nécessaire. Les stubs sortent de `camlidl` déjà compatibles avec la version d'OCaml utilisée.
-
 ### mlapronidl
 
-Les bindings OCaml d'Apron — `mlapronidl` — couvrent 18 modules IDL décrivant chaque concept de domaine abstrait : scalaires, intervalles, expressions linéaires, contraintes linéaires, générateurs, expressions arborescentes, managers, et les valeurs abstraites elles-mêmes (niveau 0 brut et niveau 1 avec environnements). C'est là que réside la majorité de la surface FFI d'Apron.
-
-La compilation est plus complexe que mlgmpidl parce que les fichiers IDL de `mlapronidl` ont été écrits pour un ancien couple `camlidl`/OCaml. Lancer `camlidl` directement produirait des stubs qui ne compilent pas proprement. Le correctif vient de deux scripts Perl fournis par le dépôt Apron : `perlscript_c.pl` réécrit le `.c` généré, `perlscript_caml.pl` réécrit le `.ml`/`.mli` généré.
+De même,`mlapronidl` est celui qui encapsule les domaines d'APRON pour qu'ils soit utilisables en OCaml. Et même principe, nous générons avec les fichiers C avec le `Makefile` que nous compilons avec `emcc`.
 
 ```make
-for idl in $(MLAPRONIDL_IDL); do
-    $(CAMLIDL) -no-include -prepro "$(PERL) macros.pl" $$idl.idl && \
-    $(PERL) perlscript_c.pl    < $${idl}_stubs.c > $${idl}_caml.c && \
-    $(PERL) perlscript_caml.pl < $$idl.ml        > $$idl.ml.tmp && mv $$idl.ml.tmp $$idl.ml && \
-    $(PERL) perlscript_caml.pl < $$idl.mli       > $$idl.mli.tmp && mv $$idl.mli.tmp $$idl.mli
-done
+$(MAKE) -C $(DEPS_DIR)/apron/mlapronidl CAMLIDL=$(CAMLIDL) PERL=$(PERL) $(MLAPRONIDL_IDL:%=%_caml.c)
 for module in $(MLAPRONIDL_MODULES); do
     $(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
         -I$(DEPS_DIR)/apron/apron -I$(DEPS_DIR)/apron/mlapronidl \
@@ -209,7 +228,7 @@ done
 $(EMAR) rcs $@ $(addprefix $(BUILD_DIR)/,$(MLAPRONIDL_MODULES:%=%.o))
 ```
 
-`CAMLIDL_CFLAGS` contient notamment `-I$(OCAML_STDLIB)`, qui pointe vers les headers du runtime OCaml dans `deps/ocaml-wasm/runtime` — les stubs seront exécutés par ce même runtime, ils doivent donc être compilés contre ses headers pour que les deux s'accordent.
+## Compiling APRON
 
 Chaque domaine numérique (box, octagones, polka) obtient ensuite sa propre archive, compilée avec `-DNUM_MPQ` :
 
@@ -220,7 +239,7 @@ $(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
 $(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
 ```
 
-`NUM_MPQ` indique à Apron d'utiliser les rationnels multi-précision exacts de GMP (`mpq_t`) plutôt que des `double` matériels pour toutes les bornes. Les domaines flottants d'Apron s'appuient normalement sur `fesetround` pour contrôler l'arrondi vers le haut/bas au niveau matériel — et WebAssembly n'a aucun contrôle de mode d'arrondi FPU. Avec `NUM_MPQ`, chaque borne est calculée exactement via GMP et `fesetround` n'est jamais nécessaire.
+`NUM_MPQ` indique à Apron d'utiliser les rationnels multi-précision exacts de GMP (`mpq_t`) plutôt que des `double` matériels pour toutes les bornes. Les domaines flottants d'Apron s'appuient normalement sur `fesetround` pour contrôler l'arrondi vers le haut/bas au niveau matériel mais WebAssembly n'a aucun contrôle de mode d'arrondi FPU. Avec `NUM_MPQ`, chaque borne est calculée exactement via GMP et `fesetround` n'est jamais nécessaire.
 
 
 ## Compiling LLVM/Clang 9
@@ -302,6 +321,16 @@ The loop is closed: the bytecode calls a primitive by index → at startup, `cam
 - Perf profile (Clang parsing dominates), size (~15 MB), what this demonstrates.
 - Honesty about the "first" claim → a *Prior art* sidebar (see note below).
 - Outlook: upstream the OCaml patches?
+
+---
+
+## Remerciements
+
+Le port OCaml → WASM repose sur le travail de [Vincent Chan](https://github.com/okcdz) sur [`ocaml-wasm`](https://github.com/vincentdchan/ocaml) (août 2021), qui a fourni les tweaks `configure` originaux et les stubs Unix (`unix_lib.c`, `socketaddr.c`, `unixsupport.c`, …) nécessaires pour faire tourner le runtime OCaml sous emscripten.
+
+Pour la compilation LLVM/Clang vers wasm, [le fork de Binji](https://github.com/binji/llvm-project) et [ses notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) ont été essentiels pour comprendre comment s'y prendre.
+
+Les versions spécifiques de GMP et MPFR compatibles avec emscripten ont été trouvées grâce à [cette réponse Stack Overflow](https://stackoverflow.com/a/43583154).
 
 ---
 
