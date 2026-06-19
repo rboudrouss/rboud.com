@@ -227,11 +227,128 @@ $(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
 `NUM_MPQ` tells Apron to use GMP's exact multi-precision rationals (`mpq_t`) instead of hardware `double` for all bounds. Apron's floating-point domains normally rely on `fesetround` to control hardware rounding direction, but WebAssembly has no FPU rounding mode control. With `NUM_MPQ`, every bound is computed exactly via GMP and `fesetround` is never needed.
 
 
-## Compiling LLVM/Clang 9
+## Compiler LLVM/Clang 9 pour wasm32
 
-- two-stage cross-compile: native `llvm-tblgen` / `clang-tblgen` first, then the wasm libs (~30 min, RTTI/EH off)
-- list of retained Clang libs
-- `Clang_to_ml.cc`: the C++→OCaml values bridge, and the Clang resource headers preloaded into the virtual FS
+LLVM ne s'écrit pas entièrement à la main. Une grande partie du code C++ — les parseurs d'instructions, les diagnostics, les attributs Clang — est *générée* à partir de fichiers `.td` (TableGen) par des outils appelés `llvm-tblgen` et `clang-tblgen`. Ces outils s'exécutent sur la machine hôte *pendant* la compilation de LLVM/Clang lui-même.
+
+La solution est une compilation en deux étapes distinctes.
+
+### La compilation en deux étapes
+
+
+**Étape 1 : compiler les outils natifs.**
+
+```make
+cmake -G Ninja -S $(LLVM_WASM_SRC)/llvm -B $(LLVM_NATIVE_BUILD) \
+  -DCMAKE_C_COMPILER=gcc-11 \
+  -DCMAKE_CXX_COMPILER=g++-11 \
+  -DLLVM_ENABLE_PROJECTS=clang \
+  -DLLVM_TARGETS_TO_BUILD=host \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_BUILD_TOOLS=OFF \
+  ...
+ninja -C $(LLVM_NATIVE_BUILD) llvm-tblgen clang-tblgen
+```
+
+On compile uniquement `llvm-tblgen` et `clang-tblgen`, nativement, avec `gcc-11`. On utilise `gcc-11` parce que LLVM 9 date de 2019 et son C++ n'est plus compatible avec les version récentes de `gcc` et `clang`.
+
+**Étape 2 : compiler les bibliothèques wasm en pointant vers les outils natifs.**
+
+```make
+cmake -G Ninja -S $(LLVM_WASM_SRC)/llvm -B $(LLVM_WASM_BUILD) \
+  -DCMAKE_TOOLCHAIN_FILE=$(EMSDK_TOOLCHAIN) \
+  -DLLVM_TABLEGEN=$(LLVM_NATIVE_BUILD)/bin/llvm-tblgen \
+  -DCLANG_TABLEGEN=$(LLVM_NATIVE_BUILD)/bin/clang-tblgen \
+  -DLLVM_ENABLE_PROJECTS=clang \
+  -DLLVM_TARGETS_TO_BUILD=WebAssembly \
+  -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-unknown-emscripten \
+  -DLLVM_HOST_TRIPLE=wasm32-unknown-emscripten \
+  -DLLVM_ENABLE_THREADS=OFF \
+  -DLLVM_ENABLE_ZLIB=OFF \
+  -DLLVM_ENABLE_TERMINFO=OFF \
+  -DLLVM_ENABLE_LIBEDIT=OFF \
+  -DLLVM_ENABLE_LIBXML2=OFF \
+  -DLLVM_ENABLE_ASSERTIONS=OFF \
+  -DLLVM_ENABLE_EH=OFF \
+  -DLLVM_ENABLE_RTTI=OFF \
+  ...
+```
+
+Les flags `-DLLVM_TABLEGEN` et `-DCLANG_TABLEGEN` permettent de court-circuiter la recompilation des outils TableGen et pointent directement vers les binaires natifs construits à l'étape précédente. CMake sait alors qu'il doit cibler wasm32 pour les bibliothèques, mais utiliser les outils déjà compilé pour la génération de code.
+
+### Les bibliothèques retenues
+
+On ne compile pas tout LLVM. Le target Ninja liste exactement ce dont `Clang_to_ml.cc` a besoin pour parser du C :
+
+```make
+ninja -C $(LLVM_WASM_BUILD) \
+  clangFrontend clangParse clangAST clangLex clangBasic \
+  clangSema clangDriver clangEdit clangSerialization \
+  clangAnalysis clangStaticAnalyzerCore \
+  LLVMSupport LLVMCore LLVMMC LLVMMCParser \
+  LLVMBinaryFormat LLVMBitReader LLVMBitstreamReader \
+  LLVMOption LLVMProfileData LLVMDemangle LLVMRemarks
+```
+
+Pas de backend de génération de code (`LLVMX86*`, `LLVMAArch64*`, etc.), pas d'optimiseurs (`LLVMTransformUtils`, `LLVMInstCombine`, etc.). On veut uniquement le frontend de parsing (lexer, parser, AST, sémantique) et le support LLVM minimal requis.
+
+## Compiler `Clang_to_ml.cc`
+
+`Clang_to_ml.cc` est le cœur du frontend C de MOPSA. C'est un fichier de ~5000 lignes qui fait deux choses en même temps :
+
+1. Il pilote Clang pour parser un fichier C (via `CompilerInstance`, `ParseAST`, `RecursiveASTVisitor`).
+2. Il alloue des valeurs OCaml et les remplit avec les données de l'AST Clang.
+
+Ce qui rend ce fichier particulier, c'est qu'il inclut *simultanément* des headers Clang et des headers du runtime OCaml :
+
+```cpp
+// Headers Clang
+#include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Frontend/CompilerInstance.h"
+// ...
+
+// Headers OCaml
+#include <caml/mlvalues.h>
+#include <caml/alloc.h>
+#include <caml/memory.h>
+// ...
+```
+
+À chaque nœud de l'AST Clang, le visiteur crée un bloc OCaml correspondant avec `caml_alloc`, y stocke des champs avec `Store_field`, et retourne une `value` OCaml vers le code OCaml qui a appelé ce C++. C'est de l'allocation dans le tas du garbage collector OCaml, depuis du C++, avec les macros `CAMLparam`/`CAMLlocal`/`CAMLreturn` qui maintiennent les invariants du GC.
+
+La compilation de ce fichier requiert trois ensembles d'includes en même temps :
+
+```make
+em++ -std=c++14 \
+  -I$(LLVM_WASM_SRC)/llvm/include \           # headers LLVM
+  -I$(LLVM_WASM_SRC)/clang/include \          # headers Clang (sources)
+  -I$(LLVM_WASM_BUILD)/include \              # headers générés par TableGen
+  -I$(LLVM_WASM_BUILD)/tools/clang/include \  # headers Clang générés
+  -I$(OCAML_STDLIB) \                         # <caml/*.h> du runtime OCaml
+  -DCLANGRESOURCE=\"/clang-headers\" \
+  -fno-rtti -fno-exceptions \
+  -c $(CLANG_TO_ML_SRC) -o $(BUILD_DIR)/clang_to_ml.o
+```
+
+Le `-DCLANGRESOURCE="/clang-headers"` est expliqué juste après.
+
+### Les resource headers de Clang
+
+Pour parser du C, Clang a besoin de ses propres headers built-in : `stddef.h`, `limits.h`, `__stddef_max_align_t.h`, etc. Ce sont des headers Clang-spécifiques, distincts des headers système, qui définissent les types et macros fondamentaux de manière portable. Sur un système Linux normal, ils vivent dans `/usr/lib/clang/9.0.1/include/`.
+
+Dans un binaire wasm, il n'y a pas de filesystem système. On les précharge dans le filesystem virtuel d'Emscripten :
+
+```make
+ninja -C $(LLVM_WASM_BUILD) install-clang-resource-headers
+# installe dans $(INSTALL_DIR)/lib/clang/9.0.1/include/
+```
+
+Et dans le link final :
+```make
+--preload-file $(INSTALL_DIR)/lib/clang/9.0.1/include@/clang-headers/include
+```
+
+`Clang_to_ml.cc` est compilé avec `-DCLANGRESOURCE="/clang-headers"`, ce qui dit à Clang où chercher ces headers dans le FS virtuel. Sans ça, le premier `#include <stddef.h>` d'un fichier C analysé échoue avec une erreur de header introuvable — dans le navigateur, silencieusement dans la plupart des cas.
 
 ## The final link: everything static
 
