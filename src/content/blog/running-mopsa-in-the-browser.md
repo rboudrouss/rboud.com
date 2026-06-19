@@ -127,7 +127,7 @@ Each primitive is declared `extern value foo();` with no argument prototype. The
 
 ## Compiling the ocaml runtime
 
-La compilation du runtime est assez directe, modulo un petit soucis. OCaml 4.14 a introduit `runtime/sak`, un outil exécuté sur le host pour encoder le chemin de la stdlib dans un littéral C. `emconfigure` le compile avec `emcc` et produit un `.wasm` impossible à exécuter nativement, le build continue silencieusement, le chemin reste vide, et l'échec n'arrive qu'à l'exécution. pour résoudre ça je compile `sak` manuellement avec le vrai `cc` avant de lancer `make`.
+Compiling the runtime is fairly straightforward, with one small catch. OCaml 4.14 introduced `runtime/sak`, a tool run on the host to encode the stdlib path as a C string literal. `emconfigure` compiles it with `emcc` and produces a `.wasm` binary that cannot be executed natively and the build continues silently, the path stays empty, and the failure only surfaces at runtime. The fix is to compile `sak` manually with the real `cc` before calling `make`.
 
 ```make
 CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
@@ -140,13 +140,13 @@ touch runtime/sak.o runtime/sak
 CFLAGS="$(CFLAGS)" $(MAKE) -C runtime libcamlrun.a
 ```
 
-Le répertoire `runtime/` contient les headers `<caml/*.h>` qui définissent l'API FFI d'OCaml, les mêmes dont dépendent tous les stubs C qu'on va compiler ensuite. Toutes les compilations ultérieures qui touchent au FFI passent donc `-I$(OCAML_STDLIB)`, ce qui pointe vers ce même `runtime/`. Ça garantit que les stubs sont compilés contre les définitions exactes du runtime qui les exécutera.
+The `runtime/` directory contains the `<caml/*.h>` headers that define OCaml's FFI API, the same headers every C stub compiled next depends on. Every subsequent compilation that touches the FFI passes `-I$(OCAML_STDLIB)`, pointing at that same `runtime/`. This guarantees that stubs are compiled against the exact definitions of the runtime that will execute them.
 
 ## Compiling MPFR & GMP
 
-GMP et MPFR sont les deux premières bibliothèques à compiler, et c'est là que la chance commence : elles compilent avec emscripten sans quasiment aucune modification.
+GMP and MPFR are the first two libraries to compile. Both build easily with Emscripten almost unchanged.
 
-Le pattern est le même pour les deux : `emconfigure ./configure` suivi de `make`. `emconfigure` substitue les variables d'environnement du compilateur (`CC`, `AR`, etc.) pour pointer vers les outils emscripten, ce qui suffit pour que la détection de features dans `configure` cible wasm32 plutôt que le host.
+The pattern is the same for both: `emconfigure ./configure` followed by `make`. `emconfigure` rewrites the compiler environment variables (`CC`, `AR`, etc.) to point at the Emscripten toolchain, which is enough for the feature detection in `configure` to target wasm32 instead of the host.
 
 ```make
 # GMP
@@ -156,7 +156,7 @@ CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
     --prefix=$(INSTALL_DIR)
 $(MAKE) && $(MAKE) install
 
-# MPFR (dépend de GMP)
+# MPFR (depends on GMP)
 touch aclocal.m4 configure
 find . -name "Makefile.in" -exec touch {} \;
 CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
@@ -166,22 +166,24 @@ CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
 $(MAKE) && $(MAKE) install
 ```
 
-Deux détails à noter. Pour GMP, `--disable-assembly` est indispensable : GMP utilise normalement des routines assembleur spécifiques à l'architecture (x86, ARM…) pour ses performances, et emscripten ne peut évidemment pas les compiler. `--host=none` empêche `configure` de détecter et d'utiliser les optimisations du host. Pour MPFR, le `touch` sur `aclocal.m4` et `configure` évite que `make` tente de relancer autoconf pour recalculer les `Makefile.in` — ce qui échouerait dans l'environnement emscripten.
+Two details worth noting.  
+For GMP, `--disable-assembly` is mandatory: GMP normally uses architecture-specific assembly routines (x86, ARM...) for performance, and Emscripten cannot compile them. `--host=none` prevents `configure` from detecting and using host-specific optimizations.  
+For MPFR, the `touch` on `aclocal.m4` and `configure` prevents `make` from trying to re-run autoconf to regenerate the `Makefile.in` files, which would fail inside the Emscripten environment.
 
-Les versions spécifiques (GMP 6.1.2 et MPFR 4.2.2) ne sont pas arbitraires : ce sont celles connues pour compiler proprement avec emscripten, pointées par [une réponse Stack Overflow](https://stackoverflow.com/a/43583154).
+The specific versions (GMP 6.1.2 and MPFR 4.2.2) are not arbitrary, they are the ones known to compile cleanly with Emscripten, identified in [a Stack Overflow answer](https://stackoverflow.com/a/43583154).
 
 
 ## Compiling CamlIDL based stubs
 
-CamlIDL est un générateur de stubs. On lui donne un fichier `.idl` décrivant un ensemble de types et fonctions C, et il produit deux choses : `foo_stubs.c`, qui contient les fonctions C qui convertissent les valeurs OCaml vers C et inversement, et `foo.ml`/`foo.mli`, qui est l'API OCaml. L'idée est de ne jamais écrire la tuyauterie de conversion à la main.
+CamlIDL is a stub generator. You give it an `.idl` file describing a set of C types and functions, and it produces two things: `foo_stubs.c`, containing the C functions that convert OCaml values to and from C, and `foo.ml`/`foo.mli`, the OCaml API. The idea is to never write the conversion plumbing by hand.
 
-Deux dépendances de MOPSA s'appuient là-dessus énormement : **mlgmpidl** (bindings OCaml pour GMP et MPFR) et **mlapronidl** (bindings OCaml pour les domaines abstraits d'Apron). Ensemble, ils représentent environ 655 des ~1435 primitives de la table finale.
+Two of MOPSA's dependencies rely on this heavily: **mlgmpidl** (OCaml bindings for GMP and MPFR) and **mlapronidl** (OCaml bindings for Apron's abstract domains). Together they account for roughly 655 of the ~1435 primitives in the final table.
 
 ### CamlIDL runtime
 
-`camlidl` s'éxecute au moment de la compulation pur générer les fichiers `.ml` et `.c` nécessaire. Sauf que tout les fichiers générés reposes sur le `CamlIDL runtime` qui est un ensemble de 3 fichiers (`idlalloc.c`, `comintf.c` et `comerror.c`) qui fournissent des utils pour les codes générés, notamment l'allocation mémoire et des utilitaires d'interfaces...
+`camlidl` runs at build time to generate the required `.ml` and `.c` files. Every generated file depends on the CamlIDL runtime which is a set of three files (`idlalloc.c`, `comintf.c`, and `comerror.c`) that provide utilities for the generated code, mainly memory allocation and interface helpers.
 
-Voici la commande dans le makefile utilisé pour complisé ces fichiers
+Here is the Makefile rule used to compile these files:
 
 ```make
 $(LIBS_DIR)/libcamlidl.a:
@@ -195,28 +197,11 @@ $(LIBS_DIR)/libcamlidl.a:
         $(BUILD_DIR)/idlalloc.o $(BUILD_DIR)/comintf.o $(BUILD_DIR)/comerror.o
 ```
 
-On notera l'option `-I$(OCAML_STDLIB)`, c'est le chemin vers les headers de la FFI OCaml, ceux du runtime qu'on vient de compiler. Elle est nécessaire pour deux raisons : ces fichiers camlidl appellent les fonctions de la FFI, et leurs headers doivent être précisément ceux, spécifiques, du runtime qui sera amené à exécuter.
+Note the `-I$(OCAML_STDLIB)` flag that points at the OCaml FFI headers from the runtime we just compiled.
 
-### mlgmpidl
+### mlgmpidl and mlapronidl
 
-Le module mlgmpidl est donc celui qui encapsule les différents type proposé par GMP & MPFR poru qu'ils puissent être utilisé en OCaml. Il est composé de six modules au totale. Pour le compiler nous générons avec le `Makefile` les différents ficheirs C que nous compilons avec `emcc`
-
-```make
-$(LIBS_DIR)/libgmp_caml.a: $(LIBS_DIR)/libgmp.a $(LIBS_DIR)/libmpfr.a $(LIBS_DIR)/libcamlidl.a
-    cd $(DEPS_DIR)/mlgmpidl
-    CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
-        -prefix $(INSTALL_DIR) -gmp-prefix $(INSTALL_DIR) -mpfr-prefix $(INSTALL_DIR)
-    CFLAGS="$(CFLAGS)" $(MAKE) $(MLGMPIDL_MODULES:%=%.c)
-    for module in $(MLGMPIDL_MODULES); do
-        $(EMCC) $(EMCC_FLAGS) -c -I$(OCAML_STDLIB) -I$(INSTALL_DIR)/include \
-            $${module}.c -o $(BUILD_DIR)/$${module}.o
-    done
-    $(EMAR) rcs $(LIBS_DIR)/libgmp_caml.a $(addprefix $(BUILD_DIR)/,$(MLGMPIDL_MODULES:%=%.o))
-```
-
-### mlapronidl
-
-De même,`mlapronidl` est celui qui encapsule les domaines d'APRON pour qu'ils soit utilisables en OCaml. Et même principe, nous générons avec les fichiers C avec le `Makefile` que nous compilons avec `emcc`.
+Both `mlgmpidl` (GMP/MPFR bindings) and `mlapronidl` (Apron abstract domain bindings) follow the same pattern: use the upstream `Makefile` to generate the CamlIDL stubs as `.c` files, then compile each one with `emcc`. For example, `mlapronidl`:
 
 ```make
 $(MAKE) -C $(DEPS_DIR)/apron/mlapronidl CAMLIDL=$(CAMLIDL) PERL=$(PERL) $(MLAPRONIDL_IDL:%=%_caml.c)
@@ -230,7 +215,7 @@ $(EMAR) rcs $@ $(addprefix $(BUILD_DIR)/,$(MLAPRONIDL_MODULES:%=%.o))
 
 ## Compiling APRON
 
-Chaque domaine numérique (box, octagones, polka) obtient ensuite sa propre archive, compilée avec `-DNUM_MPQ` :
+Each numerical domain (box, octagons, polka) is compiled as its own archive, compiled with `-DNUM_MPQ`:
 
 ```make
 $(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
@@ -239,7 +224,7 @@ $(EMCC) $(EMCC_FLAGS) -c $(CAMLIDL_CFLAGS) \
 $(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
 ```
 
-`NUM_MPQ` indique à Apron d'utiliser les rationnels multi-précision exacts de GMP (`mpq_t`) plutôt que des `double` matériels pour toutes les bornes. Les domaines flottants d'Apron s'appuient normalement sur `fesetround` pour contrôler l'arrondi vers le haut/bas au niveau matériel mais WebAssembly n'a aucun contrôle de mode d'arrondi FPU. Avec `NUM_MPQ`, chaque borne est calculée exactement via GMP et `fesetround` n'est jamais nécessaire.
+`NUM_MPQ` tells Apron to use GMP's exact multi-precision rationals (`mpq_t`) instead of hardware `double` for all bounds. Apron's floating-point domains normally rely on `fesetround` to control hardware rounding direction, but WebAssembly has no FPU rounding mode control. With `NUM_MPQ`, every bound is computed exactly via GMP and `fesetround` is never needed.
 
 
 ## Compiling LLVM/Clang 9
