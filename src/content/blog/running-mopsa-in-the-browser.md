@@ -425,15 +425,8 @@ So we apply this fix to avoid any unsigned negation:
 
 In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed pointer, with no unsigned negation. `Tag_val` is no longer an l-value (you can't write through it anymore), so I added `Tag_set`, which rewrites *only* the tag byte while preserving the wosize and the color. The few sites that wrote the tag via `Tag_val(...) = ...` were migrated to `Tag_set`.
 
-## 8. The long tail of soundness under wasm
 
-- Apron FPU missing → `__wrap_ap_fpu_init` returns `true` (safe under NUM_MPQ, exact GMP).
-- `floats_round` re-inflated by 1 ULP (`nextafter` / `nextafterf`) for wasm's
-  round-to-nearest.
-- `FLT_EVAL_METHOD` / SSE2 during the i386 build.
-- C++ reference types modeled as pointers → the CPython stubs parse on 32-bit.
-
-## 9. From a .wasm to a real app
+## From a .wasm to a real app
 
 - emscripten virtual FS (preloading `mopsa.bc`, Clang/linux32 headers, `share/mopsa`),
   the primitive table (`prims.o`) + the unix/str primitives.
@@ -442,6 +435,36 @@ In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed poi
 - Web Worker; synchronous stdin via `SharedArrayBuffer` / `Atomics.wait` for the
   interactive/DAP sessions; COOP/COEP.
 - Toute l'histoire javascript, notamment comment on a fait l'interactif, le worker, l'api etc....
+
+## A few soundness adjustments for wasm
+
+The `.wasm` loads, the runtime runs, the analysis terminates. What was left was a series of small assumptions, scattered across the native dependencies, that no longer hold once you're on wasm32 and that, if left alone, silently compromise the *soundness* of the analysis rather than crashing it.
+
+The first we've already met: on wasm everything is *round-to-nearest, ties-to-even*, with no `fesetround` to control the direction. Since the error of a round-to-nearest is bounded by 0.5 ULP (*Unit in the Last Place* — the gap between two consecutive representable floats, i.e. the weight of the last mantissa bit at that magnitude), it's enough to inflate every computed bound by 1 ULP outward (`nextafter` toward `+∞` for upper bounds, toward `-∞` for lower ones) to recover a correct enclosure. This lives in MOPSA's `floats_round.c`, behind an `#ifdef __EMSCRIPTEN__` branch, and the inflation is adaptive: if the `double` actually fits in a `float`, it inflates by one *float* ULP (`nextafterf`, ~1e-7) rather than one *double* ULP (~2e-16), to avoid needlessly widening single-precision intervals.
+
+<!-- The same file requires `FLT_EVAL_METHOD == 0`, i.e. that `double`s really are computed at `double` precision. But the 32-bit bytecode build goes through i386, where the historical x87 FPU evaluates in extended precision (`FLT_EVAL_METHOD == 2`). The workaround, in `docker/build-mopsa-32bc.sh`: `-mfpmath=sse -msse2`, which forces floating-point arithmetic onto the SSE2 registers and brings `FLT_EVAL_METHOD` back to `0`, the behavior MOPSA expects. -->
+
+Apron, for its part, calls `ap_fpu_init` at startup, which probes the FPU via `fesetround(FE_UPWARD)`. On wasm that probe necessarily fails. We short-circuit the function at link time with `-Wl,--wrap=ap_fpu_init`, and our override in `backend/wasm/ap_fpu_wasm.c` (`__wrap_ap_fpu_init`) simply returns `true`. It's harmless here because everything is compiled with `NUM_MPQ`, so all bound arithmetic goes through GMP's exact rationals, never the FPU.
+
+Finally, a subtler case on the C frontend side. MOPSA's parser runs in two stages: `Clang_to_ml.cc` walks the Clang AST and mirrors each node into an OCaml `value`, then `Clang_to_C.ml` translates that raw Clang AST into MOPSA's own internal C AST (`T_pointer`, `T_record`, …). This case lives in the second stage.
+
+The trigger is `va_list`, whose shape depends on the target. On x86-64 it's an array (`__va_list_tag[1]`) that decays to a pointer — already handled by a helper, `fix_va_list`, that recognizes the `__va_list_tag *` pattern and folds it back to the `va_list` typedef. But on 32-bit targets (i386/wasm32) `va_list` is a plain scalar (`void*`), and `__builtin_va_start` takes its argument *by reference*, so the type now arrives as an `LValueReferenceType`. `Clang_to_C.ml` had no case for reference types and fell straight through to its catch-all:
+
+```ocaml
+| _ -> error range "unhandled type" (C.string_of_type t)
+```
+
+which aborts with `unhandled type: lvalue_ref(__builtin_va_list=void*)`. That blocked parsing of the CPython stub (`share/mopsa/stubs/cpython/Python.c`, `PyErr_Format`'s `va_start`) and therefore all cross C/Python analysis on 32-bit. Since a reference is ABI-equivalent to a pointer, the fix is just to model it as one, right before the catch-all:
+
+```ocaml
+(* References are ABI-equivalent to pointers; model them as such. These
+   surface in C code via builtins such as __builtin_va_start, whose va_list
+   argument is passed by reference when va_list is a scalar (a void
+   pointer) on 32-bit targets, unlike x86-64 where it is an array that
+   decays to a pointer (see fix_va_list above). *)
+| C.LValueReferenceType tq -> T_pointer (type_qual range tq), no_qual
+| C.RValueReferenceType tq -> T_pointer (type_qual range tq), no_qual
+```
 
 ## 10. Bonus: cross C/Python analysis
 
