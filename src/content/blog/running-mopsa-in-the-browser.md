@@ -125,7 +125,7 @@ char * caml_names_of_builtin_cprim[] = {
 
 Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
-## Compiling the ocaml runtime
+## Compiling the ocaml runtime (4.14.2)
 
 Compiling the runtime is fairly straightforward, with one small catch. OCaml 4.14 introduced `runtime/sak`, a tool run on the host to encode the stdlib path as a C string literal. `emconfigure` compiles it with `emcc` and produces a `.wasm` binary that cannot be executed natively and the build continues silently, the path stays empty, and the failure only surfaces at runtime. The fix is to compile `sak` manually with the real `cc` before calling `make`.
 
@@ -357,44 +357,73 @@ emscripten's final link pulls everything into a single `ocamlrun.wasm`:
 ```make
 $(EMCC) ... -o $(DIST_DIR)/ocamlrun.js \
     --preload-file $(BUILD_DIR)/mopsa.bc@/build/mopsa.bc \
-    $(DEPS_BIN_DIR)/*.a $(LIBS_DIR)/*.a \
+    $(LIBS_DIR)/*.a \
     -s ERROR_ON_UNDEFINED_SYMBOLS=1 \
     $(BUILD_DIR)/prims.o $(BUILD_DIR)/libcamlrun.a
 ```
 
 Three things worth noting:
 
-- **Everything is statically linked**: `libcamlrun.a` (the interpreter), `prims.o` (the primitive table), and all the `.a` archives — GMP, MPFR, Apron, the CamlIDL runtime, the OCaml Apron stubs (box/oct/polka), Zarith, Clang/LLVM, MOPSA's C parser, and my `libmopsa_primitives.a` (unix + str). That's what yields a self-contained `.wasm` of ~15 MB.
-- `ERROR_ON_UNDEFINED_SYMBOLS=1` is my safety net: it guarantees that **every symbol named in `caml_builtin_cprim[]` actually exists** in one of the archives. If `primitives.txt` names a primitive that nothing provides, the wasm link fails loudly — rather than hitting `unknown C primitive` at runtime, in the browser, at the worst possible moment.
-- **`mopsa.bc` is not linked**: it is *preloaded* into emscripten's virtual filesystem, then interpreted at runtime by `ocamlrun`. It's bytecode, not native code.
+- **Everything is statically linked**: `libcamlrun.a` (the interpreter), `prims.o` (the primitive table), and all the `.a` archives (GMP, MPFR, Apron, the CamlIDL runtime, the OCaml Apron stubs (box/oct/polka), Zarith, Clang/LLVM, MOPSA's C parser, and my `libmopsa_primitives.a` (unix + str)). That's what yields a self-contained `.wasm` of ~15 MB.
+- `ERROR_ON_UNDEFINED_SYMBOLS=1` guarantees that **every symbol named in `caml_builtin_cprim[]` actually exists** in one of the archives. If `primitives.txt` names a primitive that nothing provides, the wasm link fails loudly rather than hitting `unknown C primitive` at runtime, in the browser, at the worst possible moment.
+- **`mopsa.bc` is not linked**, it is *preloaded* into emscripten's virtual filesystem, then interpreted at runtime by `ocamlrun`. It's bytecode, not native code.
 
-The loop is closed: the bytecode calls a primitive by index → at startup, `caml_prim_table` is filled from `caml_builtin_cprim[]` without a single `dlopen` → and those symbols point to C code statically linked into the single `ocamlrun.wasm`. OCaml's dynamic mechanism has been entirely replaced by a resolution frozen at link time — which is exactly what a WebAssembly binary expects.
+We did everything right, yet at runtime in the browser we hit an "index out of bounds".
 
-## 4. The core fight: OCaml values across the FFI boundary on wasm32
+## OCaml values at the FFI boundary on wasm32
 
-- Primer: how an OCaml value is represented (immediate vs boxed block, the **header word**
-  before the pointer, tag + wosize + color). Memory diagram.
-- Why this touches **all** of the FFI: every camlidl stub, every `caml_alloc`,
-  `Clang_to_ml.cc` — they all read the tag via `Hd_val`/`Tag_val` = pointer arithmetic on
-  the header.
-- The bug: under emscripten, `header_t` width and the byte-by-byte access in `Tag_val`
-  were miscompiled → corrupted tag the moment a C/C++ stub touched an OCaml value.
-  Symptoms (silent crashes / nonsense values).
-- The diagnosis (how you trace it back to the macro).
-- **The fix, with the diff:** `Hd_val` → `*((uint32_t*)val - 1)`, `Tag_val` made
-  non-l-value, new `Tag_set` (mask 0xFF, preserving wosize/color); propagation into
-  `compare.c` / `hash.c` / `obj.c` / `alloc.c`.
-- Why *this* is what unblocks the entire native FFI chain.
+The "index out of bounds" leads us straight into OCaml's memory representation. An OCaml value is either *immediate* (an integer encoded directly in the word, with its low bit set to 1) or a boxed *block* (a pointer to a heap region preceded by a **header word**). That header, placed right *before* the pointer, encodes three fields: the **tag** (the low 8 bits, the block's constructor, or `Double_array_tag`, `String_tag`, etc.), the **wosize** (size in words) and the GC **color**.
 
-## 5. 31-bit ints → why the bytecode itself must be built 32-bit
+```
+        Header                  block data
+   ┌──────────────────┐   ┌──────────┬──────────┬─────
+   │ wosize| col | tag│   │ field 0  │ field 1  │ ...
+   └──────────────────┘   └──────────┴──────────┴─────
+          val[-1]              ▲ val points here
+```
 
-- OCaml bytecode bakes in the native `int` width; wasm32 = 31-bit OCaml ints.
-- Hence the `linux/386` Docker build: OCaml 4.14.2 built from source
-  `--host=i686-linux-gnu` (the `uname` / `REG_RIP` / `SIGSTKSZ` trick), opam i686,
-  a system switch.
-- **The honest plot twist** (from my notes): in practice the *native 64-bit* bytecode
-  also runs on wasm32 — why, and what that says about bytecode portability.
-  Sidebar: "what I expected vs what actually happened".
+Tracing the "index out of bounds" back to the macro, we land on OCaml 4.14.2's form of `Tag_val`, in little-endian:
+
+```c
+#define Tag_val(val) (((unsigned char *) (val)) [-sizeof(value)])
+```
+
+My first thought was a bad compilation of `sizeof(value)` or a 64/32-bit mismatch. But `sizeof` is a compile-time constant, and it always evaluates to `4` here; the config is perfectly consistent under ILP32 (`SIZEOF_PTR == SIZEOF_LONG == 4`, and `ARCH_SIXTYFOUR` being undefined implies `intnat == value == header_t == uintnat == 4` bytes), and no build path ever switches to 64 bits. The hypothesis of a 64-bit `header_t` or a mis-evaluated `sizeof` is wrong.
+
+The real problem is an **unsigned negation**. The type of `sizeof(value)` is `size_t`, *unsigned* (4 bytes on wasm32). So the negation never produces `-4`, it wraps around:
+
+```
+-sizeof(value) = -(size_t)4 = 0xFFFFFFFC   (unsigned wraparound, not -4!)
+p[0xFFFFFFFC]  = *(p + 0xFFFFFFFC)
+```
+
+To see why the *same* expression behaves differently on x86 and on wasm, you have to follow it through the compiler. Clang doesn't emit a memory access directly: it first lowers `p[idx]` into a [`getelementptr`](https://llvm.org/docs/LangRef.html#getelementptr-instruction) (GEP) in LLVM IR (the instruction that computes `address = base + index × sizeof(element)`) and *then* the backend lowers that GEP, together with the load, into a native (or wasm) memory instruction. The C is identical on both targets, only this last lowering step differs.
+
+**On native 32-bit**, the effective address lives in a 32-bit register, and `p + 0xFFFFFFFC` is a plain 32-bit `add`. The add overflows and the hardware silently truncates modulo 2³², so the result is *exactly* `p - 4`. It is technically overflowing, but it "works" by wraparound, which is why upstream OCaml gets away with it on every 32-bit native platform.
+
+**On wasm32**, addresses are also `i32`, so you might expect the same wrap. But wasm offers two ways to add an offset, and they don't behave the same:
+
+- an explicit `i32.add`, which *does* wrap modulo 2³², this would have given `p - 4` and worked.
+- the **static offset baked into the memory instruction** (`i32.load offset=N`), where the runtime computes the effective address as `ea = base + N` and bounds-checks `ea + access_size` against the linear-memory size. That comparison is done on the full, untruncated value and it does **not** wrap modulo 2³².
+
+Because `0xFFFFFFFC` is a compile-time constant, LLVM does the natural optimization and folds it into the load's static offset rather than emitting a separate `i32.add`. So instead of computing `p - 4`, the runtime checks:
+
+```
+ea = p + 0xFFFFFFFC   ~ 4 GiB, no wraparound
+ea + 1 > memory_size  -> trap -> out of bounds
+```
+
+That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survives as a near-4 GiB constant offset that the wasm bounds check rejects.
+
+So we apply this fix to avoid any unsigned negation:
+
+```c
+#define Hd_val(val)      (*((uint32_t *)(val) - 1))
+#define Tag_val(val)     ((tag_t)(Hd_val(val) & 0xFF))
+#define Tag_set(val, t)  (Hd_val(val) = (Hd_val(val) & ~(uint32_t)0xFF) | (uint32_t)(tag_t)(t))
+```
+
+In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed pointer, with no unsigned negation. `Tag_val` is no longer an l-value (you can't write through it anymore), so I added `Tag_set`, which rewrites *only* the tag byte while preserving the wosize and the color. The few sites that wrote the tag via `Tag_val(...) = ...` were migrated to `Tag_set`.
 
 ## 8. The long tail of soundness under wasm
 
@@ -412,6 +441,7 @@ The loop is closed: the bytecode calls a primitive by index → at startup, `cam
   no Asyncify because of OCaml exceptions' setjmp/longjmp).
 - Web Worker; synchronous stdin via `SharedArrayBuffer` / `Atomics.wait` for the
   interactive/DAP sessions; COOP/COEP.
+- Toute l'histoire javascript, notamment comment on a fait l'interactif, le worker, l'api etc....
 
 ## 10. Bonus: cross C/Python analysis
 
