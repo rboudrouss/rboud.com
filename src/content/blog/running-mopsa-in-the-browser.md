@@ -428,11 +428,14 @@ In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed poi
 
 ## D'un `.wasm` à une vraie app
 
-À ce stade j'ai un `ocamlrun.wasm` de 15 Mo qui sait interpréter `mopsa.bc`. Mais un `.wasm` n'est pas une application : il faut l'instancier, lui donner des fichiers à analyser, récupérer sa sortie, et — pour les modes interactif et debugger — lui *parler pendant qu'il tourne*. Toute cette couche est en JavaScript, et c'est là que se cachent les décisions les moins évidentes.
+À ce stade j'ai un `ocamlrun.wasm` de 15 Mo qui sait interpréter `mopsa.bc`. Mais un `.wasm` n'est pas une application : il faut l'instancier, lui donner des fichiers à analyser, récupérer sa sortie, et pour les modes interactif et debugger, lui *parler pendant qu'il tourne*.
 
 ### Une instance neuve par analyse
 
-Le premier réflexe serait d'instancier le `.wasm` une fois et de relancer une analyse à chaque fois que l'utilisateur édite son code. Ça ne marche pas : **le runtime OCaml n'est pas réentrant**. Il s'appuie sur tout un état global (le tas du GC, la table des primitives, les variables globales du bytecode), et `mopsa.bc` se termine par un `exit`. Une fois `main` sorti, l'instance est dans un état dont on ne sait pas revenir proprement.
+Le premier réflexe serait d'instancier le `.wasm` une fois et de relancer une analyse à chaque fois que l'utilisateur édite son code. Mais ça ne marche pas car le runtime OCaml n'est pas réentrant. Il s'appuie sur tout un état global (le tas du GC, la table des primitives, les variables globales du bytecode), et `mopsa.bc` se termine par un `exit`. Une fois `main` sorti, l'instance est dans un état dont on ne sait pas revenir proprement.
+
+
+Une solution aurait été de garder une seule instance et d'utiliser **Asyncify** pour suspendre/reprendre le runtime autour des entrées-sorties. Mais Asyncify est incompatible avec le mécanisme d'exceptions d'OCaml, qui repose sur `setjmp`/`longjmp`, les deux se disputent le contrôle de la pile et se marchent dessus.
 
 J'ai donc choisi de **repartir d'une instance neuve à chaque analyse**. Côté Emscripten, ça se traduit par `MODULARIZE=1` plus un `EXPORT_NAME` :
 
@@ -442,8 +445,6 @@ J'ai donc choisi de **repartir d'une instance neuve à chaque analyse**. Côté 
 ```
 
 Au lieu d'instancier le module au chargement, Emscripten expose une *factory* `createMopsaModule(config)` qui renvoie une `Promise` vers une instance fraîche, configurable au cas par cas. Chaque analyse appelle `createMopsaModule(...)`, laisse tourner `main`, récupère la sortie, puis jette l'instance.
-
-L'alternative aurait été de garder une seule instance et d'utiliser **Asyncify** pour suspendre/reprendre le runtime autour des entrées-sorties. Mais Asyncify est **incompatible avec le mécanisme d'exceptions d'OCaml**, qui repose sur `setjmp`/`longjmp` : les deux se disputent le contrôle de la pile et se marchent dessus. Une instance jetable contourne le problème entièrement, et au passage simplifie tout le reste du raisonnement.
 
 ### Le système de fichiers virtuel
 
@@ -458,7 +459,7 @@ MOPSA est un outil en ligne de commande : il lit des fichiers, une config, des s
   --preload-file $(DEPS_DIR)/mopsa-analyzer/share/mopsa@/share/mopsa \
   ```
 
-  Le bytecode `mopsa.bc`, les headers built-in de Clang, les headers système linux32, et `share/mopsa` (les configs et les stubs C/Python) atterrissent à des chemins fixes dans le FS virtuel.
+  Le bytecode `mopsa.bc`, les headers built-in de Clang, les headers système linux32 nécessaire pour analyser du C avec MOPSA, et `share/mopsa` (les configs et les stubs C/Python) atterrissent à des chemins fixes dans le FS virtuel.
 
 - **Le dynamique, écrit à la volée.** Le code de l'utilisateur, sa config, ses fichiers supplémentaires sont écrits juste avant le lancement, dans un hook `preRun`. Pour ça j'exporte `FS` (écrire les fichiers) et `ENV` (positionner des variables d'environnement) :
 
@@ -478,13 +479,13 @@ MOPSA est un outil en ligne de commande : il lit des fichiers, une config, des s
   }
   ```
 
-  Le `TERM = "xterm-256color"` n'est pas cosmétique : MOPSA décide d'émettre (ou non) des couleurs ANSI en lisant `Sys.getenv "TERM"` (dans `utils/core/debug.ml`). Sans `TERM`, un Worker n'a pas d'environnement et la sortie est monochrome ; en le forçant, on récupère les couleurs qu'on rend ensuite dans `xterm.js`.
+  Le `TERM = "xterm-256color"` permet a MOPSA de d'émettre des couleurs ANSI dans ces sorties qu'on gère ensuite avec `xterm.js`.
 
 ### Le runner : `mopsa_worker.ml`
 
-Le point d'entrée du bytecode n'est pas le `main` de MOPSA, mais un petit fichier maison, `mopsa_worker.ml`, compilé en bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Son rôle : préparer `Sys.argv` *avant* de déléguer à `Mopsa_analyzer.Framework.Runner`.
+Le point d'entrée du bytecode n'est pas le `main` de MOPSA, mais un petit fichier maison, `mopsa_worker.ml`, compilé en bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Son rôle est de préparer `Sys.argv` *avant* de déléguer à `Mopsa_analyzer.Framework.Runner`.
 
-L'essentiel de sa logique gère l'analyse **multilangage C + Python**. En ligne de commande, MOPSA s'attend à ce que les sources C aient été compilées au préalable dans une *build DB* (`mopsa.db`) — ce que fait normalement le driver `mopsa` en interceptant les appels au compilateur. Dans le navigateur, il n'y a pas de compilateur à intercepter, donc je fabrique cette DB à la main :
+C'est notamment utile pour l'analyse **multilangage C + Python** où MOPSA, notamment quand il y a plusieus fichier C, qu'on ait généré au préalable une *"buid DB"* (`mopsa.db`). Je fabrique manuellement cette db avec tout les fichiers C :
 
 ```ocaml
 (* Multilangage : générer mopsa.db depuis les fichiers C, ne passer que le .py d'entrée. *)
@@ -508,19 +509,13 @@ function buildArgs(options, isHelp) {
 
 ### L'API : `window.mopsaJs`
 
-Tout passe par un objet global, `window.mopsaJs`, installé par `mopsa_api.js` — un script **synchrone, chargé avant le bundle React**, de sorte que l'API est prête instantanément quand React démarre.
+Tout passe par un objet global, `window.mopsaJs`, installé par `mopsa_api.js`, un script **synchrone, chargé avant le bundle React**, de sorte que l'API est prête instantanément quand React démarre.
 
-L'idée directrice : **garder l'état dans le thread principal, en JS pur**, et ne réveiller le WASM que pour analyser. Le code courant, la config, les fichiers supplémentaires sont de simples variables :
-
-```js
-var _code = "int main() { return 0; }\n";
-var _config = CONFIG_UNI;
-var _extraFiles = {}; // path → content
-```
+Tout l'état du code et géré et garder dans le thread js principal, et je ne fais appel au wasm que pour l'analyse.
 
 Tous les helpers de « système de fichiers » (`writeFile`, `readFile`, `listDir`, `deleteFile`, …) sont adossés à ces objets JS. Éditer du code, changer de fichier, naviguer dans l'arborescence : tout ça est synchrone et instantané, sans jamais toucher au WASM. Le `.wasm` n'entre en scène que quand on appelle `analyze()`.
 
-Et c'est un autre principe : **c'est le Worker qui possède le binaire**. Le `.wasm` (15 Mo) et le `.data` (~21 Mo) sont lourds ; on ne veut ni les charger dans le thread principal, ni bloquer l'UI pendant une analyse qui peut durer une vingtaine de secondes pour du C+Python. `analyze()` se contente d'envoyer l'état courant au Worker et de renvoyer une `Promise` résolue à la réponse :
+De plus, **c'est le Worker qui possède le binaire**. Le `.wasm` (15 Mo) et le `.data` (~21 Mo) sont lourds, on ne veut ni les charger dans le thread principal, ni bloquer l'UI pendant une analyse qui peut durer assez longtemps. `analyze()` se contente d'envoyer l'état courant au Worker et de renvoyer une `Promise` résolue à la réponse :
 
 ```js
 analyze: function (options) {
@@ -535,22 +530,6 @@ analyze: function (options) {
   });
 },
 ```
-
-#### Superséder les analyses en vol
-
-L'app relance une analyse à *chaque* frappe (debouncée). Problème : le Worker exécute le WASM de façon **synchrone** — tant qu'une analyse tourne, il ignore les `postMessage` suivants. Les analyses s'empileraient et se joueraient l'une après l'autre, alors que seule la dernière compte.
-
-La solution est brutale mais fiable : une nouvelle `analyze()` **annule** ce qui est en vol. Les runs périmés sont résolus avec `null` (et non rejetés), ce qui les sort du chemin d'erreur — la couche React ignore un résultat `null` et laisse le dernier bon résultat à l'écran. Puis on tue et on relance le Worker :
-
-```js
-if (!_session && Object.keys(_pending).length > 0) {
-  _cancelPendingBatches();   // resolve(null) pour chaque run en attente
-  _worker.terminate();       // un Worker bloqué ne s'interrompt pas autrement
-  _spawnWorker();
-}
-```
-
-Ce « `terminate()` + respawn » est le seul moyen d'interrompre un Worker occupé — c'est exactement le même mécanisme que pour tuer une session (voir plus loin).
 
 ### Le Worker et le coût d'une instance
 
@@ -574,9 +553,9 @@ moduleConfig.getPreloadedPackage = function () { return dataBuffer; };
 
 C'est ce qui rend « une instance neuve par analyse » abordable : on paie la compilation et le fetch une fois, et chaque run ne paie que l'instanciation. La sortie est capturée via les callbacks `print`/`printErr` ; le `exit` d'OCaml se manifeste comme une exception `ExitStatus` qu'on reconnaît à son champ `status` et qu'on traite comme une fin normale.
 
-### Le mode interactif et DAP : le vrai morceau
+### Le mode interactif et DAP
 
-C'est là que tout se complique. Le mode batch est un simple aller-retour. Mais MOPSA a aussi un mode **interactif** (un REPL où l'on avance pas à pas dans l'analyse) et un mode **DAP** (Debug Adapter Protocol, le protocole qui alimente les debuggers de VS Code). Ces deux modes sont **un seul run, long, qui lit son stdin et se *bloque* en attendant qu'on lui réponde**.
+Le mode "batch" est un simple aller-retour. Mais MOPSA a aussi un mode **interactif** (un REPL où l'on avance pas à pas dans l'analyse) et un mode **DAP** (Debug Adapter Protocole). Ces deux modes sont un seul run, long, qui lit son stdin et se *bloque* en attendant qu'on lui réponde.
 
 Or le Worker exécute le WASM de façon synchrone : quand MOPSA lit stdin, le thread du Worker est *gelé* à l'intérieur de la lecture. Il ne peut pas traiter un `postMessage` qui arriverait entre-temps. Il faut donc un **stdin synchrone** : un canal d'où le Worker peut tirer un octet de façon bloquante, pendant que le thread principal y écrit de façon asynchrone.
 
@@ -589,14 +568,6 @@ La seule primitive du web qui permet ça est le couple `SharedArrayBuffer` / `At
 ```
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
-```
-
-D'où la garde au démarrage d'une session :
-
-```js
-if (typeof SharedArrayBuffer === "undefined" || !self.crossOriginIsolated) {
-  throw new Error("The " + engine + " engine needs cross-origin isolation ...");
-}
 ```
 
 #### Brancher un stdin bloquant sur Emscripten
@@ -705,11 +676,6 @@ which aborts with `unhandled type: lvalue_ref(__builtin_va_list=void*)`. That bl
 | C.RValueReferenceType tq -> T_pointer (type_qual range tq), no_qual
 ```
 
-## 10. Bonus: cross C/Python analysis
-
-- The `mopsa.db` generation in `mopsa_worker.ml`, the argument split, the multilanguage
-  pipeline. (Short — a teaser for a possible follow-up post.)
-
 ## 11. Wrap-up
 
 - Perf profile (Clang parsing dominates), size (~15 MB), what this demonstrates.
@@ -725,19 +691,3 @@ Le port OCaml → WASM repose sur le travail de [Vincent Chan](https://github.co
 Pour la compilation LLVM/Clang vers wasm, [le fork de Binji](https://github.com/binji/llvm-project) et [ses notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) ont été essentiels pour comprendre comment s'y prendre.
 
 Les versions spécifiques de GMP et MPFR compatibles avec emscripten ont été trouvées grâce à [cette réponse Stack Overflow](https://stackoverflow.com/a/43583154).
-
----
-
-## Source map (where the war stories live, for drafting)
-
-- `Hd_val` / `Tag_val` / `Tag_set` patch → `deps/ocaml-wasm`, commit `1ace8399bb`
-  (`runtime/caml/mlvalues.h`, `compare.c`, `hash.c`, `obj.c`, `alloc.c`)
-- 32-bit bytecode build → `docker/Dockerfile.mopsa-32bc`, `docker/build-mopsa-32bc.sh`,
-  Makefile `mopsa-bc-32` / `extract-32-headers`
-- camlidl / Apron FFI cross-compile → Makefile `apron_caml`, `gmp_caml`, `zarith`
-- LLVM/Clang wasm build → Makefile `llvm-tblgen`, `clang-wasm`, `clang_to_ml`;
-  `deps/mopsa-analyzer/parsers/c/lib/parser/Clang_to_ml.cc`
-- Soundness fixes → `backend/wasm/ap_fpu_wasm.c`; mopsa fork commits `6941f4f3d`
-  (floats_round), `4e0af0f87` (C++ refs as pointers), `10e5561bc` (cpython ob_type)
-- Runtime/app glue → `backend/wasm/mopsa_api.js`, `mopsa_worker.js`, `mopsa_worker.ml`,
-  `prims.o` (Makefile `prims`), Makefile `final-web`
