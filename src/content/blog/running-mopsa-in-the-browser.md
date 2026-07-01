@@ -426,31 +426,30 @@ So we apply this fix to avoid any unsigned negation:
 In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed pointer, with no unsigned negation. `Tag_val` is no longer an l-value (you can't write through it anymore), so I added `Tag_set`, which rewrites *only* the tag byte while preserving the wosize and the color. The few sites that wrote the tag via `Tag_val(...) = ...` were migrated to `Tag_set`.
 
 
-## D'un `.wasm` à une vraie app
+## From a `.wasm` to a real app
 
-À ce stade j'ai un `ocamlrun.wasm` de 15 Mo qui sait interpréter `mopsa.bc`. Mais un `.wasm` n'est pas une application : il faut l'instancier, lui donner des fichiers à analyser, récupérer sa sortie, et pour les modes interactif et debugger, lui *parler pendant qu'il tourne*.
+At this point I have a 15 MB `ocamlrun.wasm` that can interpret `mopsa.bc`. But a `.wasm` isn't an application: you have to instantiate it, hand it files to analyze, capture its output, and, for the interactive and debugger modes, *talk to it while it runs*.
 
-### Une instance neuve par analyse
+### A fresh instance per analysis
 
-Le premier réflexe serait d'instancier le `.wasm` une fois et de relancer une analyse à chaque fois que l'utilisateur édite son code. Mais ça ne marche pas car le runtime OCaml n'est pas réentrant. Il s'appuie sur tout un état global (le tas du GC, la table des primitives, les variables globales du bytecode), et `mopsa.bc` se termine par un `exit`. Une fois `main` sorti, l'instance est dans un état dont on ne sait pas revenir proprement.
+The first instinct would be to instantiate the `.wasm` once and re-run an analysis every time the user edits their code. But that doesn't work, because the OCaml runtime isn't re-entrant. It leans on a whole pile of global state (the GC heap, the primitive table, the bytecode's global variables), and `mopsa.bc` ends with an `exit`. Once `main` has returned, the instance is in a state there's no clean way back from.
 
+One option would have been to keep a single instance and use **Asyncify** to suspend/resume the runtime around I/O. But Asyncify is incompatible with OCaml's exception mechanism, which is built on `setjmp`/`longjmp`, the two fight over control of the stack and step on each other.
 
-Une solution aurait été de garder une seule instance et d'utiliser **Asyncify** pour suspendre/reprendre le runtime autour des entrées-sorties. Mais Asyncify est incompatible avec le mécanisme d'exceptions d'OCaml, qui repose sur `setjmp`/`longjmp`, les deux se disputent le contrôle de la pile et se marchent dessus.
-
-J'ai donc choisi de **repartir d'une instance neuve à chaque analyse**. Côté Emscripten, ça se traduit par `MODULARIZE=1` plus un `EXPORT_NAME` :
+So I chose to **start from a fresh instance for every analysis**. On the Emscripten side, that comes down to `MODULARIZE=1` plus an `EXPORT_NAME`:
 
 ```make
 -s MODULARIZE=1 \
 -s EXPORT_NAME='createMopsaModule' \
 ```
 
-Au lieu d'instancier le module au chargement, Emscripten expose une *factory* `createMopsaModule(config)` qui renvoie une `Promise` vers une instance fraîche, configurable au cas par cas. Chaque analyse appelle `createMopsaModule(...)`, laisse tourner `main`, récupère la sortie, puis jette l'instance.
+Instead of instantiating the module at load time, Emscripten exposes a *factory*, `createMopsaModule(config)`, that returns a `Promise` for a fresh instance, configurable per call. Each analysis calls `createMopsaModule(...)`, lets `main` run, captures the output, then throws the instance away.
 
-### Le système de fichiers virtuel
+### The virtual filesystem
 
-MOPSA est un outil en ligne de commande : il lit des fichiers, une config, des stubs. Dans le navigateur il n'y a pas de système de fichiers, donc on s'appuie sur le **FS virtuel d'Emscripten**. Deux moitiés :
+MOPSA is a command-line tool that reads files, a config, stubs... In the browser there's no filesystem, so we lean on **Emscripten's virtual FS**. Two halves:
 
-- **Le statique, préchargé.** Tout ce qui ne change jamais d'une analyse à l'autre est empaqueté dans `ocamlrun.data` (~21 Mo) au moment du lien, via `--preload-file` :
+- **The static half, preloaded.** Everything that never changes from one analysis to the next is packed into `ocamlrun.data` (~21 MB) at link time, via `--preload-file`:
 
   ```make
   --preload-file $(BUILD_DIR)/mopsa.bc@/build/mopsa.bc \
@@ -459,9 +458,9 @@ MOPSA est un outil en ligne de commande : il lit des fichiers, une config, des s
   --preload-file $(DEPS_DIR)/mopsa-analyzer/share/mopsa@/share/mopsa \
   ```
 
-  Le bytecode `mopsa.bc`, les headers built-in de Clang, les headers système linux32 nécessaire pour analyser du C avec MOPSA, et `share/mopsa` (les configs et les stubs C/Python) atterrissent à des chemins fixes dans le FS virtuel.
+  The `mopsa.bc` bytecode, Clang's built-in headers, the linux32 system headers MOPSA needs to analyze C, and `share/mopsa` (the configs and the C/Python stubs) all land at fixed paths in the virtual FS.
 
-- **Le dynamique, écrit à la volée.** Le code de l'utilisateur, sa config, ses fichiers supplémentaires sont écrits juste avant le lancement, dans un hook `preRun`. Pour ça j'exporte `FS` (écrire les fichiers) et `ENV` (positionner des variables d'environnement) :
+- **The dynamic half, written on the fly.** The user's code, their config, and any extra files are written right before launch, in a `preRun` hook. For that I export `FS` (to write the files) and `ENV` (to set environment variables):
 
   ```make
   -s EXPORTED_RUNTIME_METHODS="['FS','ENV']" \
@@ -472,31 +471,31 @@ MOPSA est un outil en ligne de commande : il lit des fichiers, une config, des s
     return function (M) {
       if (M.ENV) M.ENV.TERM = "xterm-256color";
       M.FS.writeFile("/config.json", config);
-      // ... mkdirTree + writeFile pour chaque fichier supplémentaire ...
-      // Le fichier de code est écrit EN DERNIER pour écraser toute entrée périmée.
+      // ... mkdirTree + writeFile for each extra file ...
+      // The code file is written LAST so it overrides any stale entry.
       M.FS.writeFile(codeFile, code);
     };
   }
   ```
 
-  Le `TERM = "xterm-256color"` permet a MOPSA de d'émettre des couleurs ANSI dans ces sorties qu'on gère ensuite avec `xterm.js`.
+  The `TERM = "xterm-256color"` lets MOPSA emit ANSI colors in its output, which we then render with `xterm.js`.
 
-### Le runner : `mopsa_worker.ml`
+### The runner: `mopsa_worker.ml`
 
-Le point d'entrée du bytecode n'est pas le `main` de MOPSA, mais un petit fichier maison, `mopsa_worker.ml`, compilé en bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Son rôle est de préparer `Sys.argv` *avant* de déléguer à `Mopsa_analyzer.Framework.Runner`.
+The bytecode's entry point isn't MOPSA's `main`, but a small in-house file, `mopsa_worker.ml`, compiled to bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Its job is to prepare `Sys.argv` *before* delegating to `Mopsa_analyzer.Framework.Runner`.
 
-C'est notamment utile pour l'analyse **multilangage C + Python** où MOPSA, notamment quand il y a plusieus fichier C, qu'on ait généré au préalable une *"buid DB"* (`mopsa.db`). Je fabrique manuellement cette db avec tout les fichiers C :
+This matters mostly for **multi-language C + Python analysis**, where MOPSA (especially when there are several C files) expects a *build DB* (`mopsa.db`) to have been generated beforehand. I build that DB by hand from all the C files.
 
 ```ocaml
-(* Multilangage : générer mopsa.db depuis les fichiers C, ne passer que le .py d'entrée. *)
+(* Multi-language: generate mopsa.db from the C files, pass only the entry .py. *)
 let db_path = Filename.concat workdir "mopsa.db" in
 generate_db db_path c_files;
 let new_argv = Array.of_list (prog :: other_args @ [entry_py]) in
 ```
 
-`mopsa_worker.ml` sépare donc `argv` en trois (flags, fichiers `.c/.h`, fichiers `.py`), et s'il y a *à la fois* du C et du Python, il génère un `mopsa.db` en mémoire avec `Mopsa_build_db`, le pose dans le répertoire de travail, et ne passe que le point d'entrée Python à l'analyseur. C'est ce qui rend l'analyse cross-C/Python possible côté client (j'y reviens plus bas).
+So `mopsa_worker.ml` splits `argv` into three (flags, `.c/.h` files, `.py` files), and if there's *both* C and Python, it generates a `mopsa.db` in memory with `Mopsa_build_db`, drops it into the working directory, and passes only the Python entry point to the analyzer. This is what makes cross-C/Python analysis possible client-side (more on that below).
 
-Côté JS, la fonction `buildArgs` complète la ligne de commande avec les chemins du FS virtuel :
+On the JS side, the `buildArgs` function fills out the command line with the virtual-FS paths:
 
 ```js
 function buildArgs(options, isHelp) {
@@ -507,19 +506,19 @@ function buildArgs(options, isHelp) {
 }
 ```
 
-### L'API : `window.mopsaJs`
+### The API: `window.mopsaJs`
 
-Tout passe par un objet global, `window.mopsaJs`, installé par `mopsa_api.js`, un script **synchrone, chargé avant le bundle React**, de sorte que l'API est prête instantanément quand React démarre.
+Everything goes through a global object, `window.mopsaJs`, installed by `mopsa_api.js` which is a **synchronous script loaded before the React bundle**, so the API is ready the instant React starts.
 
-Tout l'état du code et géré et garder dans le thread js principal, et je ne fais appel au wasm que pour l'analyse.
+All the code state is kept in the main JS thread, I only reach for the wasm when it's time to analyze.
 
-Tous les helpers de « système de fichiers » (`writeFile`, `readFile`, `listDir`, `deleteFile`, …) sont adossés à ces objets JS. Éditer du code, changer de fichier, naviguer dans l'arborescence : tout ça est synchrone et instantané, sans jamais toucher au WASM. Le `.wasm` n'entre en scène que quand on appelle `analyze()`.
+All the "filesystem" helpers (`writeFile`, `readFile`, `listDir`, `deleteFile`, ...) are backed by plain JS objects. Editing code, switching files, browsing the tree... all of it is synchronous and instant, never touching the WASM. The `.wasm` only comes into play when you call `analyze()`.
 
-De plus, **c'est le Worker qui possède le binaire**. Le `.wasm` (15 Mo) et le `.data` (~21 Mo) sont lourds, on ne veut ni les charger dans le thread principal, ni bloquer l'UI pendant une analyse qui peut durer assez longtemps. `analyze()` se contente d'envoyer l'état courant au Worker et de renvoyer une `Promise` résolue à la réponse :
+On top of that, **the Worker owns the binary**. The `.wasm` (15 MB) and the `.data` (~21 MB) are heavy, we don't want to load them on the main thread, nor block the UI during an analysis that can take a while. `analyze()` just sends the current state to the Worker and returns a `Promise` resolved when the reply comes back:
 
 ```js
 analyze: function (options) {
-  // ... (voir plus bas pour l'annulation des analyses en vol) ...
+  // ... (a fresher analyze() supersedes any in-flight run) ...
   return new Promise(function (resolve) {
     var id = _nextId++;
     _pending[id] = resolve;
@@ -531,16 +530,16 @@ analyze: function (options) {
 },
 ```
 
-### Le Worker et le coût d'une instance
+### The Worker and the cost of an instance
 
-`mopsa_worker.js` récupère le `.wasm` et le `.data` **une seule fois** au démarrage. Le `.wasm` est compilé en amont en un `WebAssembly.Module` (via `compileStreaming`), et le `.data` est gardé comme `ArrayBuffer` :
+`mopsa_worker.js` fetches the `.wasm` and the `.data` **only once**, at startup. The `.wasm` is compiled up front into a `WebAssembly.Module` (via `compileStreaming`), and the `.data` is kept as an `ArrayBuffer`:
 
 ```js
 var _wasmModulePromise = WebAssembly.compileStreaming(fetch("./ocamlrun.wasm"));
 var _dataBufferPromise = fetch("./ocamlrun.data").then(r => r.arrayBuffer());
 ```
 
-À chaque analyse, on ré-*instancie* ce module déjà compilé (rapide, aucun réseau) plutôt que de tout recharger. Deux hooks d'Emscripten permettent de réutiliser ces ressources préchargées :
+For each analysis, we re-*instantiate* this already-compiled module (fast, no network) rather than reload everything. Two Emscripten hooks let us reuse these preloaded resources:
 
 ```js
 moduleConfig.instantiateWasm = function (imports, successCallback) {
@@ -551,37 +550,37 @@ moduleConfig.instantiateWasm = function (imports, successCallback) {
 moduleConfig.getPreloadedPackage = function () { return dataBuffer; };
 ```
 
-C'est ce qui rend « une instance neuve par analyse » abordable : on paie la compilation et le fetch une fois, et chaque run ne paie que l'instanciation. La sortie est capturée via les callbacks `print`/`printErr` ; le `exit` d'OCaml se manifeste comme une exception `ExitStatus` qu'on reconnaît à son champ `status` et qu'on traite comme une fin normale.
+We pay for the compilation and the fetch once, and each run only pays for instantiation which is what makes "a fresh instance per analysis" affordable. The output is captured through the `print`/`printErr` callbacks. OCaml's `exit` surfaces as an `ExitStatus` exception, which we recognize by its `status` field and treat as a normal termination.
 
-### Le mode interactif et DAP
+### The interactive and DAP modes
 
-Le mode "batch" est un simple aller-retour. Mais MOPSA a aussi un mode **interactif** (un REPL où l'on avance pas à pas dans l'analyse) et un mode **DAP** (Debug Adapter Protocole). Ces deux modes sont un seul run, long, qui lit son stdin et se *bloque* en attendant qu'on lui réponde.
+"Batch" mode is a simple round-trip. But MOPSA also has an **interactive** mode (a REPL where you step through the analysis) and a **DAP** mode (Debug Adapter Protocol). Both of these are a single, long-lived run that reads its stdin and *blocks* waiting for a reply.
 
-Or le Worker exécute le WASM de façon synchrone : quand MOPSA lit stdin, le thread du Worker est *gelé* à l'intérieur de la lecture. Il ne peut pas traiter un `postMessage` qui arriverait entre-temps. Il faut donc un **stdin synchrone** : un canal d'où le Worker peut tirer un octet de façon bloquante, pendant que le thread principal y écrit de façon asynchrone.
+But the Worker runs the WASM synchronously. When MOPSA reads stdin, the Worker's thread is *frozen* inside the read. It can't handle a `postMessage` that arrives in the meantime. So we need a **synchronous stdin**: a channel the Worker can pull a byte from in a blocking way, while the main thread writes to it asynchronously.
 
 #### `SharedArrayBuffer` + `Atomics.wait`
 
-La seule primitive du web qui permet ça est le couple `SharedArrayBuffer` / `Atomics.wait`. Le Worker se bloque sur `Atomics.wait` jusqu'à ce que le thread principal écrive un message dans la mémoire partagée et le réveille. J'utilise pour ça la petite lib [`sync-message`](https://github.com/alexmojaki/sync-message) (vendorisée), qui encapsule ce protocole derrière `makeChannel` / `writeMessage` / `readMessage`.
+The only web primitive that makes this possible is the `SharedArrayBuffer` / `Atomics.wait` pair. The Worker blocks on `Atomics.wait` until the main thread writes a message into shared memory and wakes it up. For this I use the small [`sync-message`](https://github.com/alexmojaki/sync-message) library (vendored), which wraps this protocol behind `makeChannel` / `writeMessage` / `readMessage`.
 
-`SharedArrayBuffer` n'est accessible que si la page est **cross-origin isolated**, ce qui impose deux en-têtes HTTP :
+`SharedArrayBuffer` is only available if the page is **cross-origin isolated**, which requires two HTTP headers:
 
 ```
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-#### Brancher un stdin bloquant sur Emscripten
+#### Wiring a blocking stdin into Emscripten
 
-Emscripten lit stdin via un *char device* dont la fonction de lecture est appelée **octet par octet**, en boucle, jusqu'à ce qu'elle renvoie `null` (ce qui fait retourner le `read()` courant). Il faut donc rendre un octet à la fois, *et* renvoyer `null` à la fin de chaque ligne pour débloquer `read()` — sinon il attendrait une deuxième ligne que l'utilisateur n'a pas encore tapée. Un drapeau `delivering` distingue « je viens de finir un morceau » (renvoyer `null`, ne pas bloquer) de « début d'une lecture fraîche » (bloquer pour le prochain message) :
+Emscripten reads stdin through a *char device* whose read function is called **one byte at a time**, in a loop, until it returns `null` (which makes the current `read()` return). So we have to hand back one byte at a time, *and* return `null` at the end of each line to unblock `read()`. A `delivering` flag tells apart "I just finished a chunk" (return `null`, don't block) from "the start of a fresh read" (block for the next message):
 
 ```js
 return function () {
   if (pos < buf.length) { delivering = true; return buf[pos++]; }
-  if (eof) return null;                 // EOF permanent
-  if (delivering) { delivering = false; return null; }  // fin du morceau
-  flushOut();                           // ← voir juste en dessous
+  if (eof) return null;                 // permanent EOF
+  if (delivering) { delivering = false; return null; }  // end of the chunk
+  flushOut();                           // see just below
   while (true) {
-    var m = self.syncMessage.readMessage(channel, String(msgId++), {}); // bloque ici
+    var m = self.syncMessage.readMessage(channel, String(msgId++), {}); // blocks here
     if (m == null) continue;
     if (m.eof) { eof = true; return null; }
     buf = encoder.encode(m.data || ""); pos = 0;
@@ -590,20 +589,19 @@ return function () {
   }
 };
 ```
+While the thread is in `Atomics.wait`, **microtasks don't run**. But output is sent to the main thread via a microtask. The `mopsa >> ` prompt (no trailing newline, printed just before the read) would therefore stay stuck in the buffer: the user would see a frozen terminal, no prompt, waiting on invisible input. So we *flush the output synchronously* (`flushOut()`) right before blocking.
 
-Le `flushOut()` juste avant de bloquer est subtil et m'a coûté du temps. Pendant que le thread est dans `Atomics.wait`, **les microtâches ne tournent pas**. Or la sortie est envoyée au thread principal via une microtâche. Le prompt `mopsa >> ` (sans saut de ligne, écrit juste avant la lecture) resterait donc coincé dans le tampon : l'utilisateur verrait un terminal figé, sans prompt, en attente d'une entrée invisible. On *flushe synchroniquement* la sortie juste avant de se bloquer.
+On the output side, a `byte sink` collects the stdout/stderr bytes and `postMessage`s them to the main thread (as a *transferable*, to avoid a copy). It normally batches through a microtask, but it also exposes that synchronous `flush()` the read calls before blocking. The same sink serves both modes: interactive sends the raw bytes to `xterm`, DAP reassembles them into `Content-Length` frames.
 
-Côté sortie justement, un `byte sink` collecte les octets de stdout/stderr et les `postMessage` vers le thread principal (en *transferable*, pour éviter une copie). Il batche normalement via une microtâche, mais expose aussi ce `flush()` synchrone que la lecture appelle avant de bloquer. Le même sink sert aux deux modes : l'interactif envoie les octets bruts à `xterm`, le DAP les réassemble en trames `Content-Length`.
+#### Killing a session
 
-#### Tuer une session
+A Worker blocked in `Atomics.wait` **ignores `postMessage`**, so we can't politely ask it to stop. The only reliable interrupt is, once again, `worker.terminate()` + respawn. That's what `kill()` does, and it's also what fires on Ctrl-C in the interactive terminal.
 
-Un Worker bloqué dans `Atomics.wait` **ignore les `postMessage`** — on ne peut donc pas lui demander poliment de s'arrêter. Le seul interrupteur fiable est, là encore, `worker.terminate()` + respawn. C'est ce que fait `kill()`, et c'est aussi ce qui se déclenche sur Ctrl-C dans le terminal interactif.
+### The interactive mode, UI side
 
-### Le mode interactif côté UI
+Inside the WASM, stdin is a **non-tty** char device: `tcgetattr` fails, and MOPSA falls back to line-by-line `Stdlib.read_line`, **with no echo**. If we just relayed the keystrokes, the user wouldn't see anything they type.
 
-Dans le WASM, stdin est un char device **non-tty** : `tcgetattr` échoue, et MOPSA retombe sur un `Stdlib.read_line` ligne par ligne, **sans écho**. Si on se contentait de relayer les frappes, l'utilisateur ne verrait rien de ce qu'il tape.
-
-Le terminal fait donc **l'écho local et l'édition de ligne minimale lui-même**, puis envoie la ligne entière (plus `"\n"`) à stdin sur Entrée :
+So the terminal does **local echo and minimal line editing itself**, then sends the whole line (plus `"\n"`) to stdin on Enter:
 
 ```js
 for (const ch of data) {
@@ -612,28 +610,28 @@ for (const ch of data) {
     session.sendInput(lineRef.current + "\n");
     lineRef.current = "";
   } else if (ch === "\x7f" || ch === "\b") {  // backspace
-    // ... effacer un caractère ...
-  } else if (ch === "\x03") {                 // Ctrl-C → tuer le run
+    // ... erase one character ...
+  } else if (ch === "\x03") {                 // Ctrl-C → kill the run
     kill();
   } else if (ch === "\x04") {                 // Ctrl-D → EOF
     session.sendEof();
-  } else if (code >= 0x20) {                  // caractère imprimable → écho
+  } else if (code >= 0x20) {                  // printable char → echo
     lineRef.current += ch; term.write(ch);
   }
 }
 ```
 
-La sortie du moteur (prompts, résultats, couleurs ANSI) arrive en octets bruts et est écrite telle quelle dans `xterm.js`, qui rend la palette 256 couleurs nativement.
+The engine's output (prompts, results, ANSI colors) arrives as raw bytes and is written as-is into `xterm.js`, which renders the 256-color palette natively.
 
-### Le mode DAP côté UI
+### The DAP mode, UI side
 
-Le mode DAP est le plus exigeant : il faut parler un vrai protocole par-dessus le canal stdin/stdout. Un `DapClient` s'en charge.
+For DAP mode, we have to speak a real protocol over the stdin/stdout channel. A `DapClient` takes care of that.
 
-**Trame.** Chaque requête est encadrée à la mode Language Server : `Content-Length: N\r\n\r\n<json>`, poussée vers stdin. Le flux d'octets de stdout est, en sens inverse, réassemblé en trames : on cherche le `\r\n\r\n`, on lit `N` octets de corps, on parse le JSON.
+**Framing.** Each request is wrapped Language-Server style: `Content-Length: N\r\n\r\n<json>`, pushed to stdin. The stdout byte stream is reassembled into frames the other way around: we look for the `\r\n\r\n`, read `N` bytes of body, and parse the JSON.
 
-**Corrélation.** Normalement on apparie réponse et requête par le champ `seq`. Mais l'implémentation DAP de MOPSA écrit toujours `seq: 0` ; on corrèle donc sur `request_seq`, et le client maintient sa propre numérotation croissante.
+**Correlation.** Normally you match a response to its request by the `seq` field. But MOPSA's DAP implementation always writes `seq: 0`, so we correlate on `request_seq` instead, and the client keeps its own increasing counter.
 
-**Sérialisation des requêtes.** C'est la contrainte la plus sournoise, et elle vient directement du choix du canal : **le canal stdin sur `SharedArrayBuffer` n'a qu'un seul créneau**. Un deuxième `writeMessage` avant que le Worker ait consommé le premier l'écraserait. Le client sérialise donc les requêtes derrière une file de promesses : la suivante n'est écrite qu'une fois la précédente résolue.
+**Serializing requests.** This is the sneakiest constraint, and it comes straight from the choice of channel: **the `SharedArrayBuffer` stdin channel has a single slot**. A second `writeMessage` before the Worker has consumed the first would clobber it. So the client serializes requests behind a promise queue: the next one is written only once the previous one has settled.
 
 ```js
 sendRequest(command, args) {
@@ -644,7 +642,7 @@ sendRequest(command, args) {
 }
 ```
 
-**Poignée de main.** Le démarrage suit la chorégraphie DAP standard : `initialize`, on attend l'événement `initialized`, puis on pose les points d'arrêt (`setBreakpoints`, `setExceptionBreakpoints`) et on lance (`launch`). Le moteur émet alors un événement `stopped` au point d'entrée, et le hook React rafraîchit la pile d'appels, les scopes et les variables. Les `continue` / `next` / `stepIn` / `stepOut`, l'évaluation d'expressions dans la watch, tout passe par les mêmes requêtes sérialisées..
+**Handshake.** Startup follows the standard DAP dance: `initialize`, wait for the `initialized` event, then set the breakpoints (`setBreakpoints`, `setExceptionBreakpoints`) and `launch`. The engine then emits a `stopped` event at the entry point, and the React hook refreshes the call stack, the scopes, and the variables. `continue` / `next` / `stepIn` / `stepOut`, and expression evaluation in the watch, all go through the same serialized requests.
 
 ## A few soundness adjustments for wasm
 
@@ -676,18 +674,10 @@ which aborts with `unhandled type: lvalue_ref(__builtin_va_list=void*)`. That bl
 | C.RValueReferenceType tq -> T_pointer (type_qual range tq), no_qual
 ```
 
-## 11. Wrap-up
+## Acknowledgements
 
-- Perf profile (Clang parsing dominates), size (~15 MB), what this demonstrates.
-- Honesty about the "first" claim → a *Prior art* sidebar (see note below).
-- Outlook: upstream the OCaml patches?
+The OCaml → WASM port builds on [Vincent Chan](https://github.com/okcdz)'s work on [`ocaml-wasm`](https://github.com/vincentdchan/ocaml) (August 2021), which provided the original `configure` tweaks and the Unix stubs (`unix_lib.c`, `socketaddr.c`, `unixsupport.c`, …) needed to run the OCaml runtime under emscripten.
 
----
+For compiling LLVM/Clang to wasm, [Binji's fork](https://github.com/binji/llvm-project) and [his notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) were essential to figuring out how to go about it.
 
-## Remerciements
-
-Le port OCaml → WASM repose sur le travail de [Vincent Chan](https://github.com/okcdz) sur [`ocaml-wasm`](https://github.com/vincentdchan/ocaml) (août 2021), qui a fourni les tweaks `configure` originaux et les stubs Unix (`unix_lib.c`, `socketaddr.c`, `unixsupport.c`, …) nécessaires pour faire tourner le runtime OCaml sous emscripten.
-
-Pour la compilation LLVM/Clang vers wasm, [le fork de Binji](https://github.com/binji/llvm-project) et [ses notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) ont été essentiels pour comprendre comment s'y prendre.
-
-Les versions spécifiques de GMP et MPFR compatibles avec emscripten ont été trouvées grâce à [cette réponse Stack Overflow](https://stackoverflow.com/a/43583154).
+The specific GMP and MPFR versions compatible with emscripten were found thanks to [this Stack Overflow answer](https://stackoverflow.com/a/43583154).
