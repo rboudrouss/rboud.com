@@ -6,14 +6,14 @@ pubDate: 2026-06-04
 
 - https://mopsawasm.rboud.com/
 
-MOPSA is a static analyzer based on abstract interpretation. It analyzes C and Python code, and it's written *mostly* in OCaml. That "mostly" is doing a lot of work, under the OCaml sits a stack of native libraries (GMP, MPFR, Zarith, Apron for the numerical domains, and LLVM/Clang to parse C) all bound to OCaml through its foreign function interface (FFI).
+MOPSA is a static analyzer based on abstract interpretation. It analyzes C and Python code, and it's written *mostly* in OCaml. Under the OCaml sits a stack of native libraries (GMP, MPFR, Zarith, Apron for the numerical domains, and LLVM/Clang to parse C) all bound to OCaml through its foreign function interface (FFI).
 
 And I wanted to run it *100% client side in the browser*, no server. The analyzer itself compiled to WebAssembly.
 
-This post is how I got there. OCaml has had workable wasm solutions for a while, like `wasm_of_ocaml`. The hard part is everything *around* the OCaml. The FFI goes both ways (OCaml calls into C/C++, and C/C++ build and read OCaml values directly). Getting that mix (`.ml` + `.c` + `.cc` + generated camlidl FFI stubs) to agree on what an OCaml value *is* on `wasm32` is where the real work lives.
+OCaml has had workable wasm solutions for a while, like `wasm_of_ocaml`. The hard part is everything *around* the OCaml. The FFI goes both ways (OCaml calls into C/C++, and C/C++ build and read OCaml values directly). Getting that mix (`.ml` + `.c` + `.cc` + generated camlidl FFI stubs) to agree on what an OCaml value *is* on `wasm32` is where the real work lives.
 
 
-## Why the hard part isn't OCaml at all
+## The Dependencies
 
 ![Mopsa deps](./mopsa_deps.svg)
 
@@ -25,8 +25,7 @@ The diagram above shows every dependency that ships C or C++ code. The dashed on
 
 So a lot of the C/C++ here doesn't just compute and return, it allocates inside OCaml's heap and reads the tags and fields of OCaml blocks. Every one of those call sites bakes in an assumption about what an OCaml value is, byte for byte, in memory.
 
-
-## The architectural bet: interpret the bytecode, don't recompile OCaml
+## The architectural bet
 
 First, why not `wasm_of_ocaml`, `js_of_ocaml`, or `wasocaml`? They all share the same blind spot: they compile the OCaml and leave the C/C++ behind. That's fine for a pure-OCaml project (or one whose few native dependencies already have a JS reimplementation, like `zarith_stubs_js`). But as far as I could tell, none of them offers a general escape hatch that *doesn't* require hand-writing glue to bridge wasm and JS. In my case that would mean rewriting `Clang_to_ml.cc` entirely in JavaScript, and then maintaining that rewrite.
 
@@ -35,11 +34,11 @@ What I wanted instead was:
 - **As little code as possible**, so the result stays maintainable.
 - **As few moving parts as possible.** Getting a module compiled by `wasm_of_ocaml` to talk to one compiled by `emscripten` would mean understanding, in depth, how each compiler lays out and manages memory, and then writing the plumbing to stitch the two together.
 
-And there was a more concrete problem underneath all this: **what do I link the FFI stubs against?** The C/C++ files that use the OCaml FFI call into runtime functions (`caml_alloc`, `caml_callback`, …). If I only compile the OCaml *code*, those symbols simply don't exist, the stubs have nothing to link against.
+And there was a more concrete problem: **what do I link the FFI stubs against?** The C/C++ files that use the OCaml FFI call into runtime functions (`caml_alloc`, `caml_callback`, …). If I only compile the OCaml *code*, those symbols simply don't exist, the stubs have nothing to link against.
 
-After a lot of trial and error (much of it still visible in [this repo](https://github.com/rboudrouss/mopsa-wasm)), the answer turned out to be the **OCaml runtime itself**: it's the thing that "*provides*" an implementation of all those `caml_*` functions.
+After a lot of trial and error (much of it still visible in [this repo](https://github.com/rboudrouss/mopsa-wasm)), the answer turned out to be the **OCaml runtime itself**, it "*provides* an implementation" of all those `caml_*` functions.
 
-And that quietly solves every point at once. No more juggling several tools, I can lean on `emscripten` alone, because once I bring in the runtime I'm left with nothing but C and C++ to compile.
+And that quietly solves every point at once. I can lean on `emscripten` alone, because once I bring in the runtime I'm left with nothing but C and C++ to compile.
 
 So the plan: compile the OCaml to bytecode, compile the OCaml runtime and all the native dependencies to wasm, link that native bundle together, then run the bytecode on top. And that should just work... right?
 
@@ -47,11 +46,11 @@ So the plan: compile the OCaml to bytecode, compile the OCaml runtime and all th
 
 Before thinking about compilation (something Emscripten handles well enough), it's worth thinking about linking. The interpreter needs to find, at runtime, the C code behind each `external` declared in the bytecode. And there, **OCaml resolves its C primitives dynamically** via `dlopen` and `dlsym`.
 
-### How it works, and why it breaks
+### How Ocaml bytecode looks for primitives
 
-When you write `external foo : int -> int = "caml_foo"`, the compiler never emits a direct call to `caml_foo`. It assigns it a **number** and emits a `C_CALLn <index>` instruction. The name-address binding is only resolved at program startup: OCaml `dlopen`s the native libraries and `dlsym`s each primitive by name to fill a table of function pointers. At runtime, `C_CALLn <index>` is just `caml_prim_table[index](args)`.
+When you write `external foo : int -> int = "caml_foo"`, the compiler never emits a direct call to `caml_foo`. It assigns it a number and emits a `C_CALLn <index>` instruction. The name-address binding is only resolved at program startup where OCaml `dlopen`s the native libraries and `dlsym`s each primitive by name to fill a table of function pointers. At runtime, `C_CALLn <index>` is just `caml_prim_table[index](args)`.
 
-Emscripten does have a way to emulate dynamic module loading, but it's complex to set up and splits the binary into multiple wasm modules. Since keeping everything in a single static `.wasm` seemed simpler (and at 12 MB the result is still reasonable) I chose to short-circuit this mechanism entirely.
+Emscripten does have a way to emulate dynamic module loading (`SIDE_MODULE` & `MAIN_MODULE`), but it's complex to set up without editing too much Ocaml's code and splits the binary into multiple wasm modules. Since keeping everything in a single static `.wasm` seemed simpler (and at 12 MB the result is still reasonable) I chose to short-circuit this mechanism entirely.
 
 The OCaml runtime already has a static path for this. Before searching through `.so` files, `lookup_primitive` first checks a **static table** compiled into the runtime itself:
 
@@ -62,6 +61,7 @@ static c_primitive lookup_primitive(char * name)
   for (int i = 0; caml_names_of_builtin_cprim[i] != NULL; i++)
     if (strcmp(name, caml_names_of_builtin_cprim[i]) == 0)
       return caml_builtin_cprim[i];
+
   /* 2. only then, dynamically loaded .so files */
   for (int i = 0; i < shared_libs.size; i++) {
     void * res = caml_dlsym(shared_libs.contents[i], name);
@@ -71,25 +71,17 @@ static c_primitive lookup_primitive(char * name)
 }
 ```
 
-These two arrays, `caml_builtin_cprim[]` (the pointers) and `caml_names_of_builtin_cprim[]` (the names), are exactly what `ocamlc -custom` produces, a generated file, conventionally called `prims.c`, that declares all the primitives of the executable and stores them in these two tables. This is OCaml's "fully static" mode, originally designed to produce executables with no dependency on `dll*.so` files.
+These two arrays, `caml_builtin_cprim[]` (the pointers) and `caml_names_of_builtin_cprim[]` (the names), are exactly what `ocamlc -custom` produces (Ocaml's "fully static" mode): a generated file, conventionally called `prims.c`, that declares all the primitives of the executable and stores them in these two tables.
 
-So then I supply my own `prims.c` containing *all* the primitives the MOPSA bytecode needs, and I disable the `dlopen` branch in the runtime (which has nothing to load anyway). The patch is a few commented-out lines in `caml_build_primitive_table`:
-
-```c
-caml_ext_table_init(&shared_libs, 8);
-// wasm: shared libraries are not supported, skip open_shared_lib
-// if (libs != NULL)
-//   for (p = libs; *p != 0; p += strlen_os(p) + 1)
-//     open_shared_lib(p);
-```
+So then I supply my own `prims.c` containing *all* the primitives the MOPSA bytecode needs, and I disable the `dlopen` branch in the runtime (which has nothing to load anyway).
 
 `shared_libs` (the runtime's internal list of `dlopen`ed `.so` files) stays empty permanently. The second loop in `lookup_primitive` never finds anything: **every primitive must be present in my built-in table**, or the runtime halts immediately with `unknown C primitive`.
 
-### Building `prims.o`: extracting the primitives
+### Building `prims.c`
 
 The table must be a **superset** of everything the bytecode calls. I collect the primitives by scanning the C/C++ sources (both the runtime's and every library I link) with a small script, `extract-primitives.js`. It follows the same idea as OCaml's `gen_primitives.sh` (`sed -n 's/^CAMLprim value \(…\)/\1/p'`) but is more robust, because MOPSA's and Apron's sources don't always follow the `CAMLprim value foo(...)` convention.
 
-The result, ~1435 primitives, is the union of several worlds: the runtime core (`caml_*`), `unix` (131 primitives), `str`, `bigarray`/`int64`, and the 655 Apron stubs generated by CamlIDL (`camlidl_*_ap_*`). I commit `primitives.txt` as-is; occasionally I cross-check it against `strings build/mopsa.bc` to verify it actually covers what the bytecode calls.
+~1435 primitives that contains: the runtime core (`caml_*`), `unix` (131 primitives), `str`, `bigarray`/`int64`, and the 655 Apron stubs generated by CamlIDL (`camlidl_*_ap_*`).
 
 From that list, `prims.c` is generated with three `sed` passes in the Makefile:
 
@@ -123,9 +115,11 @@ char * caml_names_of_builtin_cprim[] = {
     "caml_array_get", "unix_read", /* … */ 0 };
 ```
 
-Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, … in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
+Each primitive is declared `extern value foo();` with no argument prototype. Their actual signatures differ (arities 1 to 5, plus `N`), but that doesn't matter, the interpreter always recasts the pointer to the right arity at the call site (`Primitive1(n)`, `Primitive2(n)`, ... in `prims.h`). Hence the `-Wno-incompatible-function-pointer-types` that silences the expected warning.
 
-## Compiling the ocaml runtime (4.14.2)
+## Compiling the ocaml runtime (libcamlrun.a)
+
+I chose to use the latest OCaml 4 bytecode interpreter (`4.14.2` when I started), as OCaml 5 introduces major runtime features such as domains and effects, which I expected would make compilation to and execution on WebAssembly more challenging. I did not investigate this further, although it may well be possible.
 
 Compiling the runtime is fairly straightforward, with one small catch. OCaml 4.14 introduced `runtime/sak`, a tool run on the host to encode the stdlib path as a C string literal. `emconfigure` compiles it with `emcc` and produces a `.wasm` binary that cannot be executed natively and the build continues silently, the path stays empty, and the failure only surfaces at runtime. The fix is to compile `sak` manually with the real `cc` before calling `make`.
 
@@ -142,7 +136,7 @@ CFLAGS="$(CFLAGS)" $(MAKE) -C runtime libcamlrun.a
 
 The `runtime/` directory contains the `<caml/*.h>` headers that define OCaml's FFI API, the same headers every C stub compiled next depends on. Every subsequent compilation that touches the FFI passes `-I$(OCAML_STDLIB)`, pointing at that same `runtime/`. This guarantees that stubs are compiled against the exact definitions of the runtime that will execute them.
 
-## Compiling MPFR & GMP
+## Compiling MPFR & GMP (libgmp.a & libmpfr.a)
 
 GMP and MPFR are the first two libraries to compile. Both build easily with Emscripten almost unchanged.
 
@@ -179,7 +173,7 @@ CamlIDL is a stub generator. You give it an `.idl` file describing a set of C ty
 
 Two of MOPSA's dependencies rely on this heavily: **mlgmpidl** (OCaml bindings for GMP and MPFR) and **mlapronidl** (OCaml bindings for Apron's abstract domains). Together they account for roughly 655 of the ~1435 primitives in the final table.
 
-### CamlIDL runtime
+### CamlIDL runtime (libcamlid.a)
 
 `camlidl` runs at build time to generate the required `.ml` and `.c` files. Every generated file depends on the CamlIDL runtime which is a set of three files (`idlalloc.c`, `comintf.c`, and `comerror.c`) that provide utilities for the generated code, mainly memory allocation and interface helpers.
 
@@ -225,6 +219,8 @@ $(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
 ```
 
 `NUM_MPQ` tells Apron to use GMP's exact multi-precision rationals (`mpq_t`) instead of hardware `double` for all bounds. Apron's floating-point domains normally rely on `fesetround` to control hardware rounding direction, but WebAssembly has no FPU rounding mode control. With `NUM_MPQ`, every bound is computed exactly via GMP and `fesetround` is never needed.
+
+
 
 
 ## Compiling LLVM/Clang 9
