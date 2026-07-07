@@ -432,11 +432,11 @@ At this point I have a 15 MB `ocamlrun.wasm` that can interpret `mopsa.bc`. But 
 
 ### A fresh instance per analysis
 
-The first instinct would be to instantiate the `.wasm` once and re-run an analysis every time the user edits their code. But that doesn't work, because the OCaml runtime isn't re-entrant. It leans on a whole pile of global state (the GC heap, the primitive table, the bytecode's global variables), and `mopsa.bc` ends with an `exit`. Once `main` has returned, the instance is in a state there's no clean way back from.
+I start from a **fresh instance for every analysis**, because the OCaml runtime isn't re-entrant. It leans on a whole pile of global state (the GC heap, the primitive table, the bytecode's global variables), and `mopsa.bc` ends with an `exit`. Once `main` has returned, the instance is in a state there's no clean way back from, so I can't reuse one instance across edits.
 
-One option would have been to keep a single instance and use **Asyncify** to suspend/resume the runtime around I/O. But Asyncify is incompatible with OCaml's exception mechanism, which is built on `setjmp`/`longjmp`, the two fight over control of the stack and step on each other.
+Keeping a single instance with **Asyncify** (to suspend/resume the runtime around I/O) is the obvious alternative, but Asyncify is incompatible with OCaml's exception mechanism because exceptions are built on `setjmp`/`longjmp`, and the two fight over control of the stack.
 
-So I chose to **start from a fresh instance for every analysis**. On the Emscripten side, that comes down to `MODULARIZE=1` plus an `EXPORT_NAME`:
+On the Emscripten side, a fresh instance per analysis comes down to `MODULARIZE=1` plus an `EXPORT_NAME`:
 
 ```make
 -s MODULARIZE=1 \
@@ -449,7 +449,7 @@ Instead of instantiating the module at load time, Emscripten exposes a *factory*
 
 MOPSA is a command-line tool that reads files, a config, stubs... In the browser there's no filesystem, so we lean on **Emscripten's virtual FS**. Two halves:
 
-- **The static half, preloaded.** Everything that never changes from one analysis to the next is packed into `ocamlrun.data` (~21 MB) at link time, via `--preload-file`:
+- **The static part, preloaded.** Everything that never changes from one analysis to the next is packed into `ocamlrun.data` (~21 MB) at link time, via `--preload-file`:
 
   ```make
   --preload-file $(BUILD_DIR)/mopsa.bc@/build/mopsa.bc \
@@ -460,7 +460,7 @@ MOPSA is a command-line tool that reads files, a config, stubs... In the browser
 
   The `mopsa.bc` bytecode, Clang's built-in headers, the linux32 system headers MOPSA needs to analyze C, and `share/mopsa` (the configs and the C/Python stubs) all land at fixed paths in the virtual FS.
 
-- **The dynamic half, written on the fly.** The user's code, their config, and any extra files are written right before launch, in a `preRun` hook. For that I export `FS` (to write the files) and `ENV` (to set environment variables):
+- **The dynamic part, written on the fly.** The user's code, their config, and any extra files are written right before launch, in a `preRun` hook. For that I export `FS` (to write the files) and `ENV` (to set environment variables):
 
   ```make
   -s EXPORTED_RUNTIME_METHODS="['FS','ENV']" \
@@ -482,7 +482,7 @@ MOPSA is a command-line tool that reads files, a config, stubs... In the browser
 
 ### The runner: `mopsa_worker.ml`
 
-The bytecode's entry point isn't MOPSA's `main`, but a small in-house file, `mopsa_worker.ml`, compiled to bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Its job is to prepare `Sys.argv` *before* delegating to `Mopsa_analyzer.Framework.Runner`.
+The bytecode's entry point is a worker `mopsa_worker.ml`, compiled to bytecode (`modes byte`, `-linkall`, `-no-check-prims`). Its job is to prepare `Sys.argv` and the environement *before* delegating to `Mopsa_analyzer.Framework.Runner`
 
 This matters mostly for **multi-language C + Python analysis**, where MOPSA (especially when there are several C files) expects a *build DB* (`mopsa.db`) to have been generated beforehand. I build that DB by hand from all the C files.
 
@@ -508,13 +508,13 @@ function buildArgs(options, isHelp) {
 
 ### The API: `window.mopsaJs`
 
-Everything goes through a global object, `window.mopsaJs`, installed by `mopsa_api.js` which is a **synchronous script loaded before the React bundle**, so the API is ready the instant React starts.
+Everything goes through a global object, `window.mopsaJs`, installed by `mopsa_api.js` which is a synchronous script loaded before the React bundle, so the API is ready the instant React starts.
 
 All the code state is kept in the main JS thread, I only reach for the wasm when it's time to analyze.
 
 All the "filesystem" helpers (`writeFile`, `readFile`, `listDir`, `deleteFile`, ...) are backed by plain JS objects. Editing code, switching files, browsing the tree... all of it is synchronous and instant, never touching the WASM. The `.wasm` only comes into play when you call `analyze()`.
 
-On top of that, **the Worker owns the binary**. The `.wasm` (15 MB) and the `.data` (~21 MB) are heavy, we don't want to load them on the main thread, nor block the UI during an analysis that can take a while. `analyze()` just sends the current state to the Worker and returns a `Promise` resolved when the reply comes back:
+On top of that, **the Worker owns the binary**. The `.wasm` (15 MB) and the `.data` (21 MB) are heavy, we don't want to load them on the main thread, nor block the UI during an analysis that can take a while. `analyze()` just sends the current state to the Worker and returns a `Promise` resolved when the reply comes back:
 
 ```js
 analyze: function (options) {
@@ -554,9 +554,9 @@ We pay for the compilation and the fetch once, and each run only pays for instan
 
 ### The interactive and DAP modes
 
-"Batch" mode is a simple round-trip. But MOPSA also has an **interactive** mode (a REPL where you step through the analysis) and a **DAP** mode (Debug Adapter Protocol). Both of these are a single, long-lived run that reads its stdin and *blocks* waiting for a reply.
+"Batch" mode is a simple round-trip, but MOPSA also has an **interactive** mode (a REPL where you step through the analysis) and a **DAP** mode (Debug Adapter Protocol). Both are a single, long-lived run that reads its stdin and *blocks* waiting for a reply.
 
-But the Worker runs the WASM synchronously. When MOPSA reads stdin, the Worker's thread is *frozen* inside the read. It can't handle a `postMessage` that arrives in the meantime. So we need a **synchronous stdin**: a channel the Worker can pull a byte from in a blocking way, while the main thread writes to it asynchronously.
+The Worker runs the WASM synchronously, so when MOPSA reads stdin the Worker's thread is *frozen* inside the read and can't handle a `postMessage` that arrives in the meantime. This forces a **synchronous stdin**: a channel the Worker can pull a byte from in a blocking way, while the main thread writes to it asynchronously.
 
 #### `SharedArrayBuffer` + `Atomics.wait`
 
