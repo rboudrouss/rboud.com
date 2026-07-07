@@ -589,13 +589,9 @@ return function () {
   }
 };
 ```
-While the thread is in `Atomics.wait`, **microtasks don't run**. But output is sent to the main thread via a microtask. The `mopsa >> ` prompt (no trailing newline, printed just before the read) would therefore stay stuck in the buffer: the user would see a frozen terminal, no prompt, waiting on invisible input. So we *flush the output synchronously* (`flushOut()`) right before blocking.
+While the thread is in `Atomics.wait`, **microtasks don't run**. But output is sent to the main thread via a microtask. The `mopsa >> ` prompt (no trailing newline, printed just before the read) would therefore stay stuck in the buffer and the user would see a frozen terminal with no prompt. So we *flush the output synchronously* (`flushOut()`) right before blocking.
 
 On the output side, a `byte sink` collects the stdout/stderr bytes and `postMessage`s them to the main thread (as a *transferable*, to avoid a copy). It normally batches through a microtask, but it also exposes that synchronous `flush()` the read calls before blocking. The same sink serves both modes: interactive sends the raw bytes to `xterm`, DAP reassembles them into `Content-Length` frames.
-
-#### Killing a session
-
-A Worker blocked in `Atomics.wait` **ignores `postMessage`**, so we can't politely ask it to stop. The only reliable interrupt is, once again, `worker.terminate()` + respawn. That's what `kill()` does, and it's also what fires on Ctrl-C in the interactive terminal.
 
 ### The interactive mode, UI side
 
@@ -611,11 +607,11 @@ for (const ch of data) {
     lineRef.current = "";
   } else if (ch === "\x7f" || ch === "\b") {  // backspace
     // ... erase one character ...
-  } else if (ch === "\x03") {                 // Ctrl-C → kill the run
+  } else if (ch === "\x03") {                 // Ctrl-C : kill the run
     kill();
-  } else if (ch === "\x04") {                 // Ctrl-D → EOF
+  } else if (ch === "\x04") {                 // Ctrl-D  EOF
     session.sendEof();
-  } else if (code >= 0x20) {                  // printable char → echo
+  } else if (code >= 0x20) {                  // printable char : echo
     lineRef.current += ch; term.write(ch);
   }
 }
@@ -623,40 +619,19 @@ for (const ch of data) {
 
 The engine's output (prompts, results, ANSI colors) arrives as raw bytes and is written as-is into `xterm.js`, which renders the 256-color palette natively.
 
-### The DAP mode, UI side
+## Misc fixes
 
-For DAP mode, we have to speak a real protocol over the stdin/stdout channel. A `DapClient` takes care of that.
+Once the `.wasm` runs and analyses terminate, a handful of assumptions scattered across the native dependencies remain that no longer hold on wasm32, they silently compromise the *soundness* of the analysis rather than crashing it.
 
-**Framing.** Each request is wrapped Language-Server style: `Content-Length: N\r\n\r\n<json>`, pushed to stdin. The stdout byte stream is reassembled into frames the other way around: we look for the `\r\n\r\n`, read `N` bytes of body, and parse the JSON.
+Apron, for its part, calls `ap_fpu_init` at startup, which probes the FPU via `fesetround(FE_UPWARD)`. On wasm that probe necessarily fails. We short-circuit the function at link time with `-Wl,--wrap=ap_fpu_init`, and our override in `backend/wasm/ap_fpu_wasm.c` (`__wrap_ap_fpu_init`) simply returns `true`. Faking success is safe for the *bound arithmetic*: everything is compiled with `NUM_MPQ`, so bounds are computed with GMP's exact rationals rather than the FPU. It does not make the FPU rounding mode controllable, as noted earlier, floats that reach Apron's API before being converted to rationals can still round the wrong way, so a residual source of unsoundness remains.
 
-**Correlation.** Normally you match a response to its request by the `seq` field. But MOPSA's DAP implementation always writes `seq: 0`, so we correlate on `request_seq` instead, and the client keeps its own increasing counter.
+Finally, MOPSA's parser runs in two stages: `Clang_to_ml.cc` walks the Clang AST and mirrors each node into an OCaml `value`, then `Clang_to_C.ml` translates that raw Clang AST into MOPSA's own internal C AST (`T_pointer`, `T_record`, …). In 32 bit clang produces types that weren't handled by `Clang_to_C.ml`.
 
-**Serializing requests.** This is the sneakiest constraint, and it comes straight from the choice of channel: **the `SharedArrayBuffer` stdin channel has a single slot**. A second `writeMessage` before the Worker has consumed the first would clobber it. So the client serializes requests behind a promise queue: the next one is written only once the previous one has settled.
+The trigger is `va_list`, whose underlying type Clang picks differently per target.
 
-```js
-sendRequest(command, args) {
-  const fire = () => this.fire(command, args);
-  const result = this.queue.then(fire, fire);
-  this.queue = result.then(() => undefined, () => undefined);
-  return result;
-}
-```
+On **x86-64**, `va_list` is an array: `__va_list_tag[1]`. Like any array passed to a function, it *decays* to a pointer, so it reaches the parser as `__va_list_tag *`. A helper, `fix_va_list`, already recognizes that pattern and folds it back into the `va_list` typedef.
 
-**Handshake.** Startup follows the standard DAP dance: `initialize`, wait for the `initialized` event, then set the breakpoints (`setBreakpoints`, `setExceptionBreakpoints`) and `launch`. The engine then emits a `stopped` event at the entry point, and the React hook refreshes the call stack, the scopes, and the variables. `continue` / `next` / `stepIn` / `stepOut`, and expression evaluation in the watch, all go through the same serialized requests.
-
-## A few soundness adjustments for wasm
-
-The `.wasm` loads, the runtime runs, the analysis terminates. What was left was a series of small assumptions, scattered across the native dependencies, that no longer hold once you're on wasm32 and that, if left alone, silently compromise the *soundness* of the analysis rather than crashing it.
-
-The first we've already met: on wasm everything is *round-to-nearest, ties-to-even*, with no `fesetround` to control the direction. Since the error of a round-to-nearest is bounded by 0.5 ULP (*Unit in the Last Place* — the gap between two consecutive representable floats, i.e. the weight of the last mantissa bit at that magnitude), it's enough to inflate every computed bound by 1 ULP outward (`nextafter` toward `+∞` for upper bounds, toward `-∞` for lower ones) to recover a correct enclosure. This lives in MOPSA's `floats_round.c`, behind an `#ifdef __EMSCRIPTEN__` branch, and the inflation is adaptive: if the `double` actually fits in a `float`, it inflates by one *float* ULP (`nextafterf`, ~1e-7) rather than one *double* ULP (~2e-16), to avoid needlessly widening single-precision intervals.
-
-<!-- The same file requires `FLT_EVAL_METHOD == 0`, i.e. that `double`s really are computed at `double` precision. But the 32-bit bytecode build goes through i386, where the historical x87 FPU evaluates in extended precision (`FLT_EVAL_METHOD == 2`). The workaround, in `docker/build-mopsa-32bc.sh`: `-mfpmath=sse -msse2`, which forces floating-point arithmetic onto the SSE2 registers and brings `FLT_EVAL_METHOD` back to `0`, the behavior MOPSA expects. -->
-
-Apron, for its part, calls `ap_fpu_init` at startup, which probes the FPU via `fesetround(FE_UPWARD)`. On wasm that probe necessarily fails. We short-circuit the function at link time with `-Wl,--wrap=ap_fpu_init`, and our override in `backend/wasm/ap_fpu_wasm.c` (`__wrap_ap_fpu_init`) simply returns `true`. It's harmless here because everything is compiled with `NUM_MPQ`, so all bound arithmetic goes through GMP's exact rationals, never the FPU.
-
-Finally, a subtler case on the C frontend side. MOPSA's parser runs in two stages: `Clang_to_ml.cc` walks the Clang AST and mirrors each node into an OCaml `value`, then `Clang_to_C.ml` translates that raw Clang AST into MOPSA's own internal C AST (`T_pointer`, `T_record`, …). This case lives in the second stage.
-
-The trigger is `va_list`, whose shape depends on the target. On x86-64 it's an array (`__va_list_tag[1]`) that decays to a pointer — already handled by a helper, `fix_va_list`, that recognizes the `__va_list_tag *` pattern and folds it back to the `va_list` typedef. But on 32-bit targets (i386/wasm32) `va_list` is a plain scalar (`void*`), and `__builtin_va_start` takes its argument *by reference*, so the type now arrives as an `LValueReferenceType`. `Clang_to_C.ml` had no case for reference types and fell straight through to its catch-all:
+On **32-bit targets** (i386/wasm32), `va_list` is instead a plain scalar, `void *`. And `__builtin_va_start(ap, …)` has to *write back* into the caller's `ap`, so it takes that argument **by reference**. With no decay to hide it, Clang therefore hands the parser a *reference to* `void *`, i.e. an `LValueReferenceType`. `Clang_to_C.ml`'s type translator had no case for reference types, so it fell straight through to its catch-all:
 
 ```ocaml
 | _ -> error range "unhandled type" (C.string_of_type t)
@@ -676,7 +651,8 @@ which aborts with `unhandled type: lvalue_ref(__builtin_va_list=void*)`. That bl
 
 ## Acknowledgements
 
-The OCaml → WASM port builds on [Vincent Chan](https://github.com/okcdz)'s work on [`ocaml-wasm`](https://github.com/vincentdchan/ocaml) (August 2021), which provided the original `configure` tweaks and the Unix stubs (`unix_lib.c`, `socketaddr.c`, `unixsupport.c`, …) needed to run the OCaml runtime under emscripten.
+The OCaml WASM port builds on [Vincent Chan](https://github.com/okcdz)'s work on [`ocaml-wasm`](https://github.com/vincentdchan/ocaml) (August 2021), which provided the original `configure` tweaks and the Unix stubs (`unix_lib.c`, `socketaddr.c`, `unixsupport.c`, …) needed to run the OCaml runtime under emscripten.
+
 
 For compiling LLVM/Clang to wasm, [Binji's fork](https://github.com/binji/llvm-project) and [his notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) were essential to figuring out how to go about it.
 
