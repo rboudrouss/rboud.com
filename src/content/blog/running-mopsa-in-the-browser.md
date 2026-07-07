@@ -160,9 +160,9 @@ CFLAGS="$(CFLAGS)" $(EMCONFIGURE) ./configure \
 $(MAKE) && $(MAKE) install
 ```
 
-Two details worth noting.  
-For GMP, `--disable-assembly` is mandatory: GMP normally uses architecture-specific assembly routines (x86, ARM...) for performance, and Emscripten cannot compile them. `--host=none` prevents `configure` from detecting and using host-specific optimizations.  
-For MPFR, the `touch` on `aclocal.m4` and `configure` prevents `make` from trying to re-run autoconf to regenerate the `Makefile.in` files, which would fail inside the Emscripten environment.
+Two details worth noting :
+- For GMP, `--disable-assembly` is mandatory: GMP normally uses architecture-specific assembly routines (x86, ARM...) for performance, and Emscripten cannot compile them. `--host=none` prevents `configure` from detecting and using host-specific optimizations.  
+- For MPFR, the `touch` on `aclocal.m4` and `configure` prevents `make` from trying to re-run autoconf to regenerate the `Makefile.in` files, which would fail inside the Emscripten environment.
 
 The specific versions (GMP 6.1.2 and MPFR 4.2.2) are not arbitrary, they are the ones known to compile cleanly with Emscripten, identified in [a Stack Overflow answer](https://stackoverflow.com/a/43583154).
 
@@ -220,8 +220,7 @@ $(EMAR) rcs $(DEPS_BIN_DIR)/libboxMPQ_caml.a $(BUILD_DIR)/box_caml.o
 
 `NUM_MPQ` tells Apron to use GMP's exact multi-precision rationals (`mpq_t`) instead of hardware `double` for all bounds. Apron's floating-point domains normally rely on `fesetround` to control hardware rounding direction, but WebAssembly has no FPU rounding mode control. With `NUM_MPQ`, every bound is computed exactly via GMP and `fesetround` is never needed.
 
-
-
+While this reduces some floating-point imprecision, a source of unsoundness persists when APRON gets floats in its API before converting them to GMP rationals.
 
 ## Compiling LLVM/Clang 9
 
@@ -270,8 +269,6 @@ cmake -G Ninja -S $(LLVM_WASM_SRC)/llvm -B $(LLVM_WASM_BUILD) \
 
 The `-DLLVM_TABLEGEN` and `-DCLANG_TABLEGEN` flags point directly at the native tools we already built.
 
-### The libraries we keep
-
 We don't build all of LLVM.
 
 ```make
@@ -285,8 +282,6 @@ ninja -C $(LLVM_WASM_BUILD) \
 ```
 
 No code-generation backend (`LLVMX86*`, `LLVMAArch64*`, etc.), no optimizers (`LLVMTransformUtils`, `LLVMInstCombine`, etc.). We only want the parsing frontend (lexer, parser, AST, semantics) and the minimal LLVM support it requires.
-
-And that's it, we have our LLVM compiled.
 
 ## Compiling `Clang_to_ml.cc`
 
@@ -361,7 +356,7 @@ $(EMCC) ... -o $(DIST_DIR)/ocamlrun.js \
 Three things worth noting:
 
 - **Everything is statically linked**: `libcamlrun.a` (the interpreter), `prims.o` (the primitive table), and all the `.a` archives (GMP, MPFR, Apron, the CamlIDL runtime, the OCaml Apron stubs (box/oct/polka), Zarith, Clang/LLVM, MOPSA's C parser, and my `libmopsa_primitives.a` (unix + str)). That's what yields a self-contained `.wasm` of ~15 MB.
-- `ERROR_ON_UNDEFINED_SYMBOLS=1` guarantees that **every symbol named in `caml_builtin_cprim[]` actually exists** in one of the archives. If `primitives.txt` names a primitive that nothing provides, the wasm link fails loudly rather than hitting `unknown C primitive` at runtime, in the browser, at the worst possible moment.
+- `ERROR_ON_UNDEFINED_SYMBOLS=1` guarantees that every symbol named in `caml_builtin_cprim[]` actually exists in one of the archives. If `primitives.txt` names a primitive that nothing provides, the wasm link fails loudly rather than hitting `unknown C primitive` at runtime, in the browser, at the worst possible moment.
 - **`mopsa.bc` is not linked**, it is *preloaded* into emscripten's virtual filesystem, then interpreted at runtime by `ocamlrun`. It's bytecode, not native code.
 
 We did everything right, yet at runtime in the browser we hit an "index out of bounds".
@@ -384,43 +379,52 @@ Tracing the "index out of bounds" back to the macro, we land on OCaml 4.14.2's f
 #define Tag_val(val) (((unsigned char *) (val)) [-sizeof(value)])
 ```
 
-My first thought was a bad compilation of `sizeof(value)` or a 64/32-bit mismatch. But `sizeof` is a compile-time constant, and it always evaluates to `4` here; the config is perfectly consistent under ILP32 (`SIZEOF_PTR == SIZEOF_LONG == 4`, and `ARCH_SIXTYFOUR` being undefined implies `intnat == value == header_t == uintnat == 4` bytes), and no build path ever switches to 64 bits. The hypothesis of a 64-bit `header_t` or a mis-evaluated `sizeof` is wrong.
+My first thought was a bad compilation of `sizeof(value)` or a 64/32-bit mismatch. But `sizeof` is a compile-time constant, and it always evaluates to `4` here. The config is perfectly consistent under ILP32 (`SIZEOF_PTR == SIZEOF_LONG == 4`, and `ARCH_SIXTYFOUR` being undefined implies `intnat == value == header_t == uintnat == 4` bytes), and no build path ever switches to 64 bits.
 
-The real problem is an **unsigned negation**. The type of `sizeof(value)` is `size_t`, *unsigned* (4 bytes on wasm32). So the negation never produces `-4`, it wraps around:
+The real problem was subtler. The type of `sizeof(value)` is `size_t`, *unsigned* (4 bytes on wasm32), so negating it never produces `-4`, it wraps around into a large positive constant:
 
 ```
 -sizeof(value) = -(size_t)4 = 0xFFFFFFFC   (unsigned wraparound, not -4!)
 p[0xFFFFFFFC]  = *(p + 0xFFFFFFFC)
 ```
 
-To see why the *same* expression behaves differently on x86 and on wasm, you have to follow it through the compiler. Clang doesn't emit a memory access directly: it first lowers `p[idx]` into a [`getelementptr`](https://llvm.org/docs/LangRef.html#getelementptr-instruction) (GEP) in LLVM IR (the instruction that computes `address = base + index × sizeof(element)`) and *then* the backend lowers that GEP, together with the load, into a native (or wasm) memory instruction. The C is identical on both targets, only this last lowering step differs.
+The negation itself isn't the problem, the sign of the constant it leaves behind is. A genuinely signed `-4`, such as `((unsigned char *) val)[-4]` or the `- 1` on a typed pointer that the fix ends up using, compiles cleanly. Only the unsigned `size_t` form breaks, because it carries the positive constant `0xFFFFFFFC`. Why that sign alone decides correctness comes down to how the compiler lowers the expression.
 
-**On native 32-bit**, the effective address lives in a 32-bit register, and `p + 0xFFFFFFFC` is a plain 32-bit `add`. The add overflows and the hardware silently truncates modulo 2³², so the result is *exactly* `p - 4`. It is technically overflowing, but it "works" by wraparound, which is why upstream OCaml gets away with it on every 32-bit native platform.
+Clang doesn't emit a memory access directly. It first lowers `p[idx]` into a [`getelementptr`](https://llvm.org/docs/LangRef.html#getelementptr-instruction) (GEP) in LLVM IR, the instruction that computes `address = base + index × sizeof(element)`, and *then* the backend lowers that GEP, together with the load, into a native (or wasm) memory instruction. The C is identical on both targets, only this last step differs:
 
-**On wasm32**, addresses are also `i32`, so you might expect the same wrap. But wasm offers two ways to add an offset, and they don't behave the same:
+**On native 32-bit**, the effective address lives in a 32-bit register, and `p + 0xFFFFFFFC` is a plain 32-bit `add`. The add overflows and the hardware silently truncates modulo 2³², so the result is *exactly* `p - 4`. It is technically overflowing, but it "works" by wraparound, which is why upstream OCaml gets away with it on every 32-bit native platform, whatever the sign of the constant.
 
-- an explicit `i32.add`, which *does* wrap modulo 2³², this would have given `p - 4` and worked.
-- the **static offset baked into the memory instruction** (`i32.load offset=N`), where the runtime computes the effective address as `ea = base + N` and bounds-checks `ea + access_size` against the linear-memory size. That comparison is done on the full, untruncated value and it does **not** wrap modulo 2³².
-
-Because `0xFFFFFFFC` is a compile-time constant, LLVM does the natural optimization and folds it into the load's static offset rather than emitting a separate `i32.add`. So instead of computing `p - 4`, the runtime checks:
+**On wasm32**, addresses are also `i32`, so you might expect the same wrap, but wasm has two ways to add an offset and they don't agree. An explicit `i32.add` *does* wrap modulo 2³², and would have given `p - 4`. The other way is the static offset baked into the memory instruction itself, `i32.load offset=N`, where `N` is an *unsigned* `u32` immediate. The runtime forms `ea = base + N` and bounds-checks `ea + access_size` against the linear-memory size on the full, untruncated value, with no wraparound. Because that immediate is unsigned, the backend can only fold a *non-negative* constant into it, and a negative displacement has to stay an explicit, wrapping `i32.add`. A signed `-4` cannot go in the offset, so it survives as an `i32.add` and wraps to `p - 4`. Our unsigned `0xFFFFFFFC` is a perfectly valid non-negative offset, so LLVM folds it into the load, and the runtime instead checks:
 
 ```
 ea = p + 0xFFFFFFFC   ~ 4 GiB, no wraparound
 ea + 1 > memory_size  -> trap -> out of bounds
 ```
 
-That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survives as a near-4 GiB constant offset that the wasm bounds check rejects.
+That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survives as a near-4 GiB constant offset that the bounds check rejects. Compiling the two foms side by side (the unsigned `[-sizeof(value)]` and a signed `[-4]`) with the project's own compiler (`emcc 4.0.22`, `clang 22`) at `-O2` produce these two wasm. Note that the difference is only signedness:
 
-So we apply this fix to avoid any unsigned negation:
+```wat
+;; ((unsigned char *) v)[-sizeof(value)]   -- original, size_t offset
+(func $tag_old (param i32) (result i32)
+  local.get 0
+  i32.load8_u offset=4294967292)            ;; 0xFFFFFFFC folded into the load -> traps
+
+;; ((unsigned char *) v)[-4]                -- signed literal
+(func $tag_signed4 (param i32) (result i32)
+  local.get 0
+  i32.const -4
+  i32.add                                   ;; explicit wrapping add -> p - 4, fine
+  i32.load8_u)
+```
+
+The folding is itself a property of this particular backend rather than of wasm as such. `wasi-sdk clang 18` on the same machine declines to fold even the unsigned form, emits the wrapping `i32.add`, and the original macro happens to work there. So rather than rely on any backend folding the offset correctly, the fix simply never produces the unsigned constant in the first place:
 
 ```c
-#define Hd_val(val)      (*((uint32_t *)(val) - 1))
 #define Tag_val(val)     ((tag_t)(Hd_val(val) & 0xFF))
 #define Tag_set(val, t)  (Hd_val(val) = (Hd_val(val) & ~(uint32_t)0xFF) | (uint32_t)(tag_t)(t))
 ```
 
-In `(uint32_t *)val - 1`, the `- 1` is a *signed* integer applied to a typed pointer, with no unsigned negation. `Tag_val` is no longer an l-value (you can't write through it anymore), so I added `Tag_set`, which rewrites *only* the tag byte while preserving the wosize and the color. The few sites that wrote the tag via `Tag_val(...) = ...` were migrated to `Tag_set`.
-
+Here the `- 1` in `(uint32_t *)val - 1` is a signed integer applied to a typed pointer, so the offset stays `-4`, the backend keeps the wrapping `i32.add`, and there is no positive constant left to fold. `Tag_val` is no longer an l-value, so you can't write through it anymore, and writes go through `Tag_set` instead, which rewrites *only* the tag byte and preserves the wosize and color. The few sites that used `Tag_val(...) = ...` were migrated over.
 
 ## From a `.wasm` to a real app
 
