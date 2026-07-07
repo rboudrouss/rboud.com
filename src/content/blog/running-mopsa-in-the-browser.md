@@ -631,7 +631,7 @@ The trigger is `va_list`, whose underlying type Clang picks differently per targ
 
 On **x86-64**, `va_list` is an array: `__va_list_tag[1]`. Like any array passed to a function, it *decays* to a pointer, so it reaches the parser as `__va_list_tag *`. A helper, `fix_va_list`, already recognizes that pattern and folds it back into the `va_list` typedef.
 
-On **32-bit targets** (i386/wasm32), `va_list` is instead a plain scalar, `void *`. And `__builtin_va_start(ap, …)` has to *write back* into the caller's `ap`, so it takes that argument **by reference**. With no decay to hide it, Clang therefore hands the parser a *reference to* `void *`, i.e. an `LValueReferenceType`. `Clang_to_C.ml`'s type translator had no case for reference types, so it fell straight through to its catch-all:
+On **32-bit targets** (i386/wasm32), `va_list` is instead a plain scalar, `void *`. And `__builtin_va_start(ap, …)` has to *write back* into the caller's `ap`, so it takes that argument **by reference**. With no decay to hide it, Clang therefore hands the parser a *reference to* `void *`, an `LValueReferenceType`. `Clang_to_C.ml`'s type translator had no case for reference types, so it fell straight through to its catch-all:
 
 ```ocaml
 | _ -> error range "unhandled type" (C.string_of_type t)
@@ -657,3 +657,5 @@ The OCaml WASM port builds on [Vincent Chan](https://github.com/okcdz)'s work on
 For compiling LLVM/Clang to wasm, [Binji's fork](https://github.com/binji/llvm-project) and [his notes](https://gist.github.com/binji/b7541f9740c21d7c6dac95cbc9ea6fca) were essential to figuring out how to go about it.
 
 The specific GMP and MPFR versions compatible with emscripten were found thanks to [this Stack Overflow answer](https://stackoverflow.com/a/43583154).
+
+Thanks to [Antoine Miné](https://mine.perso.lip6.fr/index.html.fr) for guiding me through the MOPSA codebase and supporting me throughout this project.
