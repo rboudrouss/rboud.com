@@ -1,7 +1,7 @@
 ---
 title: "How I compiled MOPSA to WebAssembly"
 description: "A static analyzer written in OCaml with native C/C++ dependencies, and what it took to drag the FFI boundary onto wasm32."
-pubDate: 2026-06-04
+pubDate: 2026-07-07
 ---
 
 - https://mopsawasm.rboud.com/
