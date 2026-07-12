@@ -389,7 +389,7 @@ The real problem was subtler. The type of `sizeof(value)` is `size_t`, *unsigned
 p[0xFFFFFFFC]  = *(p + 0xFFFFFFFC)
 ```
 
-The negation itself isn't the problem, the sign of the constant it leaves behind is. A genuinely signed `-4`, such as `((unsigned char *) val)[-4]` or the `- 1` on a typed pointer that the fix ends up using, compiles cleanly. Only the unsigned `size_t` form breaks, because it carries the positive constant `0xFFFFFFFC`. Why that sign alone decides correctness comes down to how the compiler lowers the expression.
+The negation itself isn't the problem, the sign of the constant it leaves behind is. A genuinely signed `-4`, such as `((unsigned char *) val)[-4]` or the `-(int)sizeof(value)` that the fix ends up using, compiles cleanly. Only the unsigned `size_t` form breaks, because it carries the positive constant `0xFFFFFFFC`. Why that sign alone decides correctness comes down to how the compiler lowers the expression.
 
 Clang doesn't emit a memory access directly. It first lowers `p[idx]` into a [`getelementptr`](https://llvm.org/docs/LangRef.html#getelementptr-instruction) (GEP) in LLVM IR, the instruction that computes `address = base + index × sizeof(element)`, and *then* the backend lowers that GEP, together with the load, into a native (or wasm) memory instruction. The C is identical on both targets, only this last step differs:
 
@@ -402,7 +402,7 @@ ea = p + 0xFFFFFFFC   ~ 4 GiB, no wraparound
 ea + 1 > memory_size  -> trap -> out of bounds
 ```
 
-That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survives as a near-4 GiB constant offset that the bounds check rejects. Compiling the two foms side by side (the unsigned `[-sizeof(value)]` and a signed `[-4]`) with the project's own compiler (`emcc 4.0.22`, `clang 22`) at `-O2` produce these two wasm. Note that the difference is only signedness:
+That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survives as a near-4 GiB constant offset that the bounds check rejects. Compiling the two forms side by side (the unsigned `[-sizeof(value)]` and a signed `[-4]`) with the project's own compiler (`emcc 4.0.22`, `clang 22`) at `-O2` produce these two wasm. Note that the difference is only signedness:
 
 ```wat
 ;; ((unsigned char *) v)[-sizeof(value)]   -- original, size_t offset
@@ -421,11 +421,10 @@ That trap *is* the "index out of bounds" we saw. The unsigned `0xFFFFFFFC` survi
 The folding is itself a property of this particular backend rather than of wasm as such. `wasi-sdk clang 18` on the same machine declines to fold even the unsigned form, emits the wrapping `i32.add`, and the original macro happens to work there. So rather than rely on any backend folding the offset correctly, the fix simply never produces the unsigned constant in the first place:
 
 ```c
-#define Tag_val(val)     ((tag_t)(Hd_val(val) & 0xFF))
-#define Tag_set(val, t)  (Hd_val(val) = (Hd_val(val) & ~(uint32_t)0xFF) | (uint32_t)(tag_t)(t))
+#define Tag_val(val) (((unsigned char *) (val)) [-(int)sizeof(value)])
 ```
 
-Here the `- 1` in `(uint32_t *)val - 1` is a signed integer applied to a typed pointer, so the offset stays `-4`, the backend keeps the wrapping `i32.add`, and there is no positive constant left to fold. `Tag_val` is no longer an l-value, so you can't write through it anymore, and writes go through `Tag_set` instead, which rewrites *only* the tag byte and preserves the wosize and color. The few sites that used `Tag_val(...) = ...` were migrated over.
+Casting `sizeof(value)` to `int` before negating leaves a signed `-4` instead of the unsigned `0xFFFFFFFC`. The backend can't fold a negative displacement into the load's static offset, so it keeps the wrapping `i32.add` and computes `p - 4` correctly, exactly the `$tag_signed4` form above.
 
 ## From a `.wasm` to a real app
 
