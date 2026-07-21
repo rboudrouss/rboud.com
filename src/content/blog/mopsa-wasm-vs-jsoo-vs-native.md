@@ -2,6 +2,7 @@
 title: "MOPSA on wasm vs js_of_ocaml vs native: a performance comparison"
 description: "Interpreting bytecode on a wasm-compiled runtime, compiling OCaml to JavaScript with js_of_ocaml, and running native code. What each costs, and where the wasm build quietly wins."
 pubDate: 2026-07-15
+draft: true
 tags: ["mopsa", "webassembly", "ocaml", "js_of_ocaml", "performance"]
 ---
 
