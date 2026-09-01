@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { projects } from "../data/projects";
+import { talks } from "../data/talks";
 ---
 
 <BaseLayout lang="en">
@@ -12,6 +13,7 @@ import { projects } from "../data/projects";
 				<ul class="nav-links">
 					<li><a href="#education">Education</a></li>
 					<li><a href="#experience">Experience</a></li>
+					<li><a href="#talks">Talks</a></li>
 					<li><a href="#projects">Projects</a></li>
 					<li><a href="/blog/">Blog</a></li>
 					<li><a class="lang-switch" href="/fr/">FR</a></li>
@@ -182,6 +184,28 @@ import { projects } from "../data/projects";
 							</ul>
 						</div>
 					</div>
+				</div>
+			</section>
+
+			<!-- ── TALKS ── -->
+			<section id="talks" class="section">
+				<h2 class="section-title">Talks</h2>
+				<div class="timeline">
+					{talks.map((t) => (
+						<div class="timeline-item">
+							<span class="period">{t.period.en}</span>
+							<div class="timeline-body">
+								<strong class="tl-role">{t.title}</strong>
+								<span class="tl-org">{t.event.en}</span>
+								<p class="talk-desc">{t.description.en}</p>
+								<div class="project-links talk-links">
+									{t.links.map((l) => (
+										<a href={l.href} target="_blank" class="project-link">{l.label}</a>
+									))}
+								</div>
+							</div>
+						</div>
+					))}
 				</div>
 			</section>
 
@@ -489,6 +513,18 @@ import { projects } from "../data/projects";
 		position: absolute;
 		left: 0;
 		color: var(--accent-light);
+	}
+
+	/* Talks */
+	.talk-desc {
+		font-size: 0.875rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+		max-width: 70ch;
+		margin-top: 0.4rem;
+	}
+	.talk-links {
+		margin-top: 0.6rem;
 	}
 
 	/* Projects */

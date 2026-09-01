@@ -7,6 +7,18 @@ export interface Project {
 
 export const projects: Project[] = [
   {
+    name: "Reactant",
+    links: [
+      { label: "GitHub", href: "https://github.com/rboudrouss/reactant-analyzer" },
+      { label: "npm", href: "https://www.npmjs.com/package/reactant-analyzer" },
+    ],
+    description: {
+      en: "Static analyzer for React hook bugs, based on abstract interpretation over a dedicated CFG-based IR. The analysis is whole-program, with setters tracked through the call graph and custom hooks inlined across files, which catches what AST linters cannot see: infinite render loops, derived state, stale closures, cross-component cycles. 17 rules, shipped as a Rust CLI, a WebAssembly npm package and a GitHub Action.",
+      fr: "Analyseur statique de bugs de hooks React, fondé sur l'interprétation abstraite d'une IR dédiée à base de CFG. L'analyse est globale, les setters sont suivis dans le graphe d'appels et les hooks personnalisés inlinés entre fichiers, ce qui permet de détecter ce que les linters syntaxiques ne voient pas : boucles de rendu infinies, état dérivé, closures obsolètes, cycles entre composants. 17 règles, distribué comme CLI Rust, paquet npm WebAssembly et action GitHub.",
+    },
+    tags: ["Rust", "Static Analysis", "Abstract Interpretation", "WebAssembly", "React"],
+  },
+  {
     name: "Mopsa WASM",
     links: [
       { label: "GitHub", href: "https://github.com/rboudrouss/mopsa-emcc" },
