@@ -2,6 +2,7 @@
 import { getCollection } from "astro:content";
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import FormattedDate from "../../components/FormattedDate.astro";
+import ThemeToggle from "../../components/ThemeToggle.astro";
 
 const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
 	(a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
@@ -17,6 +18,7 @@ const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
 				<ul class="nav-links">
 					<li><a href="/blog/">Blog</a></li>
 					<li><a href="/">Home</a></li>
+					<li><ThemeToggle lang="en" /></li>
 				</ul>
 			</div>
 		</nav>
@@ -87,7 +89,7 @@ const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
 		position: sticky;
 		top: 0;
 		z-index: 10;
-		background: rgba(249, 248, 245, 0.88);
+		background: var(--nav-bg);
 		backdrop-filter: blur(10px);
 		border-bottom: 1px solid var(--border);
 	}
@@ -105,6 +107,7 @@ const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
 	}
 	.nav-links {
 		display: flex;
+		align-items: center;
 		gap: 1.75rem;
 		list-style: none;
 	}

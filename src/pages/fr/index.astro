@@ -2,6 +2,7 @@
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import { projects } from "../../data/projects";
 import { talks } from "../../data/talks";
+import ThemeToggle from "../../components/ThemeToggle.astro";
 ---
 
 <BaseLayout lang="fr">
@@ -9,20 +10,18 @@ import { talks } from "../../data/talks";
 		<!-- ── NAV ── -->
 		<nav class="topnav">
 			<div class="container nav-inner">
-				<span class="nav-name"></span>
+				<a
+					class="lang-switch"
+					href="/"
+					onclick="sessionStorage.setItem('lang-override','en')">EN</a
+				>
 				<ul class="nav-links">
-					<li><a href="#formation">Formation</a></li>
-					<li><a href="#experiences">Expériences</a></li>
+					<li class="nav-section"><a href="#formation">Formation</a></li>
+					<li class="nav-section"><a href="#experiences">Expériences</a></li>
 					<li><a href="/blog/">Blog</a></li>
-					<li><a href="#presentations">Présentations</a></li>
-					<li><a href="#projets">Projets</a></li>
-					<li>
-						<a
-							class="lang-switch"
-							href="/"
-							onclick="sessionStorage.setItem('lang-override','en')">EN</a
-						>
-					</li>
+					<li class="nav-section"><a href="#presentations">Présentations</a></li>
+					<li class="nav-section"><a href="#projets">Projets</a></li>
+					<li><ThemeToggle lang="fr" /></li>
 				</ul>
 			</div>
 		</nav>
@@ -302,7 +301,7 @@ import { talks } from "../../data/talks";
 		position: sticky;
 		top: 0;
 		z-index: 10;
-		background: rgba(249, 248, 245, 0.88);
+		background: var(--nav-bg);
 		backdrop-filter: blur(10px);
 		border-bottom: 1px solid var(--border);
 	}
@@ -312,14 +311,9 @@ import { talks } from "../../data/talks";
 		justify-content: space-between;
 		height: 3.5rem;
 	}
-	.nav-name {
-		font-weight: 600;
-		font-size: 0.95rem;
-		color: var(--text);
-		letter-spacing: 0.02em;
-	}
 	.nav-links {
 		display: flex;
+		align-items: center;
 		gap: 1.75rem;
 		list-style: none;
 	}
@@ -333,11 +327,34 @@ import { talks } from "../../data/talks";
 		color: var(--accent);
 		opacity: 1;
 	}
+	/* Sits in the left slot of the bar, outside .nav-links, so it carries its
+	   own colour and size rather than inheriting them from the link list. */
 	.lang-switch {
+		color: var(--text-muted);
+		font-size: 0.9rem;
 		font-weight: 700;
 		border: 1px solid var(--border);
 		padding: 0.15rem 0.5rem;
 		border-radius: 0.25rem;
+		transition:
+			color var(--transition),
+			border-color var(--transition);
+	}
+	.lang-switch:hover {
+		color: var(--accent);
+		border-color: var(--accent);
+		opacity: 1;
+	}
+
+	/* Narrow screens keep only Blog; the in-page section links overflowed
+	   the bar and are reachable by scrolling anyway. */
+	.nav-section {
+		display: none;
+	}
+	@media (min-width: 640px) {
+		.nav-section {
+			display: block;
+		}
 	}
 
 	/* ── Hero ── */
@@ -386,11 +403,11 @@ import { talks } from "../../data/talks";
 		font-size: 0.875rem;
 		font-weight: 500;
 		background: var(--accent);
-		color: #fff;
+		color: var(--on-accent);
 		transition: background var(--transition);
 	}
 	.btn:hover {
-		background: #1f5c42;
+		background: var(--accent-hover);
 		opacity: 1;
 	}
 	.btn-ghost {

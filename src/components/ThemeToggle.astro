@@ -1,0 +1,124 @@
+---
+interface Props {
+	lang?: string;
+}
+
+const { lang = "en" } = Astro.props;
+
+const label = lang === "fr" ? "Changer de thème" : "Toggle theme";
+---
+
+<button
+	class="theme-toggle"
+	type="button"
+	title={label}
+	aria-label={label}
+	aria-live="polite"
+>
+	<svg
+		class="icon icon-sun"
+		xmlns="http://www.w3.org/2000/svg"
+		viewBox="0 0 24 24"
+		fill="none"
+		stroke="currentColor"
+		stroke-width="2"
+		stroke-linecap="round"
+		aria-hidden="true"
+	>
+		<circle cx="12" cy="12" r="4"></circle>
+		<path
+			d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+		></path>
+	</svg>
+	<svg
+		class="icon icon-moon"
+		xmlns="http://www.w3.org/2000/svg"
+		viewBox="0 0 24 24"
+		fill="none"
+		stroke="currentColor"
+		stroke-width="2"
+		stroke-linecap="round"
+		stroke-linejoin="round"
+		aria-hidden="true"
+	>
+		<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+	</svg>
+</button>
+
+<style>
+	.theme-toggle {
+		display: grid;
+		place-items: center;
+		width: 1.9rem;
+		height: 1.9rem;
+		padding: 0;
+		border: 1px solid var(--border);
+		border-radius: 0.25rem;
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+		transition:
+			color var(--transition),
+			border-color var(--transition),
+			background var(--transition);
+	}
+	.theme-toggle:hover {
+		color: var(--accent);
+		border-color: var(--accent);
+	}
+	.theme-toggle:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.icon {
+		width: 1rem;
+		height: 1rem;
+	}
+
+	/*
+	 * Which icon shows is decided in CSS, mirroring the palette selectors in
+	 * global.css, so the right one is painted on first frame without JS.
+	 */
+	.icon-moon {
+		display: none;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not(.theme-light)) .icon-sun {
+			display: none;
+		}
+		:global(:root:not(.theme-light)) .icon-moon {
+			display: block;
+		}
+	}
+	:global(:root.theme-dark) .icon-sun {
+		display: none;
+	}
+	:global(:root.theme-dark) .icon-moon {
+		display: block;
+	}
+</style>
+
+<script>
+	const root = document.documentElement;
+
+	const currentTheme = () => {
+		if (root.classList.contains("theme-dark")) return "dark";
+		if (root.classList.contains("theme-light")) return "light";
+		return window.matchMedia("(prefers-color-scheme: dark)").matches
+			? "dark"
+			: "light";
+	};
+
+	for (const button of document.querySelectorAll(".theme-toggle")) {
+		button.addEventListener("click", () => {
+			const next = currentTheme() === "dark" ? "light" : "dark";
+			root.classList.toggle("theme-dark", next === "dark");
+			root.classList.toggle("theme-light", next === "light");
+			try {
+				localStorage.setItem("theme", next);
+			} catch {
+				// Storage blocked (private mode); the choice just won't persist.
+			}
+		});
+	}
+</script>

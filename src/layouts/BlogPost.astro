@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "./BaseLayout.astro";
 import FormattedDate from "../components/FormattedDate.astro";
+import ThemeToggle from "../components/ThemeToggle.astro";
 
 interface Props {
 	title: string;
@@ -30,6 +31,7 @@ const {
 				<ul class="nav-links">
 					<li><a href="/blog/">Blog</a></li>
 					<li><a href="/">Home</a></li>
+					<li><ThemeToggle lang="en" /></li>
 				</ul>
 			</div>
 		</nav>
@@ -97,7 +99,7 @@ const {
 		position: sticky;
 		top: 0;
 		z-index: 10;
-		background: rgba(249, 248, 245, 0.88);
+		background: var(--nav-bg);
 		backdrop-filter: blur(10px);
 		border-bottom: 1px solid var(--border);
 	}
@@ -115,6 +117,7 @@ const {
 	}
 	.nav-links {
 		display: flex;
+		align-items: center;
 		gap: 1.75rem;
 		list-style: none;
 	}
@@ -230,8 +233,8 @@ const {
 		border-radius: 0.25rem;
 	}
 	.prose :global(pre) {
-		background: #1a1a2e;
-		color: #f9f8f5;
+		background: var(--code-bg);
+		color: var(--code-text);
 		padding: 1rem 1.25rem;
 		border-radius: 0.5rem;
 		overflow-x: auto;
@@ -247,6 +250,20 @@ const {
 	.prose :global(img) {
 		border-radius: 0.5rem;
 		margin: 1.5rem 0;
+	}
+
+	/*
+	 * Diagram SVGs are Excalidraw exports: a white plate with near-black ink.
+	 * Flipping them in dark mode keeps the ink readable instead of shining a
+	 * white slab at the reader. Scoped to .svg so raster photos are untouched.
+	 */
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not(.theme-light)) .prose :global(img[src$=".svg"]) {
+			filter: invert(1) hue-rotate(180deg);
+		}
+	}
+	:global(:root.theme-dark) .prose :global(img[src$=".svg"]) {
+		filter: invert(1) hue-rotate(180deg);
 	}
 	.prose :global(hr) {
 		border: none;
