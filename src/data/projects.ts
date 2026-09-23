@@ -11,6 +11,7 @@ export const projects: Project[] = [
     links: [
       { label: "GitHub", href: "https://github.com/rboudrouss/reactant-analyzer" },
       { label: "npm", href: "https://www.npmjs.com/package/reactant-analyzer" },
+      { label: "Site", href: "https://reactant.rboud.com/" },
     ],
     description: {
       en: "Static analyzer for React hook bugs, based on abstract interpretation over a dedicated CFG-based IR. The analysis is whole-program, with setters tracked through the call graph and custom hooks inlined across files, which catches what AST linters cannot see: infinite render loops, derived state, stale closures, cross-component cycles. 17 rules, shipped as a Rust CLI, a WebAssembly npm package and a GitHub Action.",
