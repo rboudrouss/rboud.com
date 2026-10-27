@@ -14,10 +14,21 @@ export const projects: Project[] = [
       { label: "Site", href: "https://reactant.rboud.com/" },
     ],
     description: {
-      en: "Static analyzer for React hook bugs, based on abstract interpretation over a dedicated CFG-based IR. The analysis is whole-program, with setters tracked through the call graph and custom hooks inlined across files, which catches what AST linters cannot see: infinite render loops, derived state, stale closures, cross-component cycles. 17 rules, shipped as a Rust CLI, a WebAssembly npm package and a GitHub Action.",
-      fr: "Analyseur statique de bugs de hooks React, fondé sur l'interprétation abstraite d'une IR dédiée à base de CFG. L'analyse est globale, les setters sont suivis dans le graphe d'appels et les hooks personnalisés inlinés entre fichiers, ce qui permet de détecter ce que les linters syntaxiques ne voient pas : boucles de rendu infinies, état dérivé, closures obsolètes, cycles entre composants. 17 règles, distribué comme CLI Rust, paquet npm WebAssembly et action GitHub.",
+      en: "Static analyzer for React hook bugs, based on abstract interpretation and whole-program analysis. Catches what linters miss: infinite render loops, stale closures, cross-component cycles. Shipped as a Rust CLI, a WebAssembly npm package and a GitHub Action.",
+      fr: "Analyseur statique de bugs de hooks React, fondé sur l'interprétation abstraite et une analyse globale du programme. Détecte ce que les linters ne voient pas : boucles de rendu infinies, closures obsolètes, cycles entre composants. Distribué comme CLI Rust, paquet npm WebAssembly et action GitHub.",
     },
     tags: ["Rust", "Static Analysis", "Abstract Interpretation", "WebAssembly", "React"],
+  },
+  {
+    name: "ocaml-emcc",
+    links: [
+      { label: "GitHub", href: "https://github.com/rboudrouss/ocaml-emcc" },
+    ],
+    description: {
+      en: "Compiles OCaml programs together with their C stubs to WebAssembly, for Node, browsers and WASI. Unlike js_of_ocaml, no C stub needs a JavaScript rewrite, so FFI-heavy libraries (zarith, apron, sqlite3...) work as is.",
+      fr: "Compile des programmes OCaml avec leurs stubs C en WebAssembly, pour Node, les navigateurs et WASI. Contrairement à js_of_ocaml, aucun stub C n'est à réécrire en JavaScript : les bibliothèques riches en FFI (zarith, apron, sqlite3...) fonctionnent telles quelles.",
+    },
+    tags: ["OCaml", "C", "WebAssembly", "Emscripten", "WASI"],
   },
   {
     name: "Mopsa WASM",
